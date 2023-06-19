@@ -31,6 +31,7 @@ class jRouter
                 throw new jamexBadAction("Action: $this->action does not exist");
 
             }
+            $this->controller->filterAccessControl();
             $action = $this->action;
             $this->controller->$action();
             $this->controller->end();
