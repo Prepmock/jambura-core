@@ -60,6 +60,11 @@ class jController
             return $this->data[$var];
         }
     }
+    
+    protected function accessRules()
+    {
+        return [];
+    }
 
     protected function loadRequests($prefix = '__')
     {
@@ -171,6 +176,34 @@ class jController
         }
 
         return $this->refRequest[$param];
+    }
+
+    /**
+     * Filters access to an action based on the controller methods.
+     *  
+     * If access is granted, it proceeds to display the action.
+     * If access is not granted, it displays an error code (401 - Access Forbidden).
+     * 
+     * @return void
+     */
+    public function filterAccessControl()
+    {
+        if (!isset($_GET['action'])) {
+            return;
+        }
+
+        $actionName = $_GET['action'];
+        $accessRules = $this->accessRules();
+
+        if (!array_key_exists($actionName, $accessRules)) {
+            return;
+        }
+
+        $accessMethod = $accessRules[$actionName];
+
+        if ($accessMethod != '' && !$this->$accessMethod) {
+            throw new Exception('(401 - Access Forbidden)');
+        }
     }
 
     public function init()
