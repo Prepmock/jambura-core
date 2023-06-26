@@ -1,7 +1,14 @@
 {
-  "name": "prepmock/jambura-core",
-  "version": "1.0",
-  "require": {
-    "robmorgan/phinx": "0.11.6"
-  }
+    "name": "prepmock/jambura-core",
+    "version": "1.0",
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/Prepmock/idiorm.git"
+        }
+    ],
+    "require": {
+        "prepmock/idiorm": "dev-master",
+        "robmorgan/phinx": "0.11.6"
+    }
 }
