@@ -1,5 +1,7 @@
 <?php
-class jController
+namespace Jambura\Mvc;
+
+class Controller
 {
     protected $loadTemplate = true;
     protected $template = DEFAULT_TEMPLATE;
@@ -19,8 +21,8 @@ class jController
             $this->parseApi = true;
         }
 
-        $this->assets = new jAssets();
-        $this->cache = jCache::init();
+        $this->assets = new \jAssets();
+        $this->cache = \jCache::init();
         // FIXME base controller should have been defined as an abstruct
         // class if this init is kept like this.
         if (session_status() == PHP_SESSION_NONE) {
@@ -32,7 +34,7 @@ class jController
             unset($_SESSION['refRequest']);
         }
 
-        $this->data['jFlash'] = new jFlash();
+        $this->data['jFlash'] = new \jFlash();
         $this->init();
     }
 

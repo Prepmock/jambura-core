@@ -1,5 +1,7 @@
 <?php
-class jRouter
+namespace Jambura\Mvc;
+
+class Router
 {
     private $controller;
     private $action;

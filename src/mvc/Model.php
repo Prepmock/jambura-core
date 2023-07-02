@@ -1,7 +1,10 @@
 <?php
-class JamburaValidationError extends Exception{};
-class JamburaSystemError extends Exception{};
-class jModel
+namespace Jambura\Mvc;
+
+class JamburaValidationError extends \Exception{};
+class JamburaSystemError extends \Exception{};
+
+class Model
 {
     protected $table;
     protected $tableName;
@@ -21,10 +24,10 @@ class jModel
         # better logic considering underscores in table names
         $tableName = $this->tableName ? $this->tableName : explode('_', $child)[1];
         if ($id) {
-            $this->table = ORM::for_table($tableName)->find_one($id);
+            $this->table = \ORM::for_table($tableName)->find_one($id);
             $this->loadRelations($id);
         } else {
-            $this->table = ORM::for_table($tableName)->create();
+            $this->table = \ORM::for_table($tableName)->create();
         }
     }
 
@@ -56,14 +59,14 @@ class jModel
         foreach ($this->relations as $key => $info) {
             $direction = isset($info['direction']) ? $info['direction'] : 'p2c';
             if ($direction == 'p2c') {
-                $table = ORM::for_table($info['table'])
+                $table = \ORM::for_table($info['table'])
                     ->where($info['column'], $id);
             } elseif ($direction == 'c2p') {
                 $this->reldata[$key] = isset($info['dest'])
-                    ? ORM::for_table($info['table'])
+                    ? \ORM::for_table($info['table'])
                         ->where($info['dest'], $this->table->{$info['column']})
                         ->find_one()
-                    : ORM::for_table($info['table'])
+                    : \ORM::for_table($info['table'])
                         ->find_one($this->table->{$info['column']});
                 continue;
             } else {
