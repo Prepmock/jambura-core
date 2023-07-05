@@ -1,7 +1,27 @@
 {
-  "name": "dodul/jambura-core",
-  "version": "1.0",
-  "require": {
-    "robmorgan/phinx": "0.11.6"
-  }
+    "name": "prepmock/jambura-core",
+    "description": "Lightweight PHP MVC framework",
+    "license": "MIT",
+    "autoload": {
+        "psr-4": {
+            "Jambura\\Mvc\\": "src/mvc/"
+        },
+        "files": [
+            "src/helpers/jassets.php",
+            "src/helpers/jcontroller.php",
+            "src/helpers/jcache.php", 
+            "src/helpers/jexceptions.php", 
+            "src/helpers/jflash.php",
+            "src/helpers/jmodel.php",
+            "src/helpers/jrouter.php"
+        ]
+    },
+    "authors": [
+        {
+            "name": "Kamrul Khan"
+        }
+    ],
+    "require": {
+        "robmorgan/phinx": "0.11.6"
+    }
 }

@@ -1,5 +1,7 @@
 <?php
-class jController
+namespace Jambura\Mvc;
+
+class Controller
 {
     protected $loadTemplate = true;
     protected $template = DEFAULT_TEMPLATE;
@@ -19,8 +21,8 @@ class jController
             $this->parseApi = true;
         }
 
-        $this->assets = new jAssets();
-        $this->cache = jCache::init();
+        $this->assets = new \jAssets();
+        $this->cache = \jCache::init();
         // FIXME base controller should have been defined as an abstruct
         // class if this init is kept like this.
         if (session_status() == PHP_SESSION_NONE) {
@@ -32,8 +34,9 @@ class jController
             unset($_SESSION['refRequest']);
         }
 
-        $this->data['jFlash'] = new jFlash();
+        $this->data['jFlash'] = new \jFlash();
         $this->init();
+        $this->filterAccessControl();
     }
 
     public function __set($var, $value)
@@ -59,11 +62,6 @@ class jController
         if (array_key_exists($var, $this->data)) {
             return $this->data[$var];
         }
-    }
-    
-    protected function accessRules()
-    {
-        return [];
     }
 
     protected function loadRequests($prefix = '__')
@@ -178,34 +176,6 @@ class jController
         return $this->refRequest[$param];
     }
 
-    /**
-     * Filters access to an action based on the controller methods.
-     *  
-     * If access is granted, it proceeds to display the action.
-     * If access is not granted, it displays an error code (401 - Access Forbidden).
-     * 
-     * @return void
-     */
-    public function filterAccessControl()
-    {
-        if (!isset($_GET['action'])) {
-            return;
-        }
-
-        $actionName = $_GET['action'];
-        $accessRules = $this->accessRules();
-
-        if (!array_key_exists($actionName, $accessRules)) {
-            return;
-        }
-
-        $accessMethod = $accessRules[$actionName];
-
-        if ($accessMethod != '' && !$this->$accessMethod) {
-            throw new Exception('(401 - Access Forbidden)');
-        }
-    }
-
     public function init()
     {
         // empty
@@ -214,5 +184,64 @@ class jController
     public function end()
     {
         // empty
+    }
+
+    protected function accessRules(): array
+    {
+        return [];
+    }
+
+    /**
+     * Grants access to an action based on the controller provided access rules.
+     *  
+     * If access is granted, it proceeds to display the action.
+     * If access is not granted, it displays an error code.
+     * 
+     * @return void
+     */
+    private function filterAccessControl()
+    {
+        $controller = $_GET['controller'];
+        $action = $_GET['action'];
+        $accessMethod = '';
+
+        // Show default index if no specific action is set 
+        if (!isset($action)) {
+            header('location:/' . $controller . '/' . 'index');
+        }
+
+        // Collect access rules from the mentioned controller
+        $accessRules = $this->accessRules();
+
+        // Collect custom message from the controller or show default message if not exists
+        $message = $accessRules[$action]['message'] ?? 'Access Denied';
+
+        // Get the universal access method applicable for all the actions defined in the controller
+        if (array_key_exists('*', $accessRules)) {
+            $accessMethod = $accessRules['*'][0] ?? '';
+            $params = $accessRules['*']['params'] ?? '';
+        }
+
+        // Get the specific access method applicable for a certain action defined in the controller
+        if (array_key_exists($action, $accessRules)) {
+            $accessMethod = $accessRules[$action][0] ?? '';
+            $params = $accessRules[$action]['params'] ?? '';
+        }
+
+        // Validates access rules based on types of the access method        
+        if (
+            (
+                gettype($accessMethod) === 'string' &&
+                $accessMethod != '' &&
+                !$accessMethod($params)
+            ) ||
+            (
+                gettype($accessMethod) === 'object' &&
+                $accessMethod != '' &&
+                !$this->{$accessRules[$action][1]}($params)
+            )
+        ) {
+            throw new jamexBadMethod($message, 401);
+        }
     }
 }

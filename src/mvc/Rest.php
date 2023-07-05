@@ -1,5 +1,7 @@
 <?php
-abstract class jRest extends jController
+namespace Jambura\Mvc;
+
+abstract class Rest extends Controller
 {
     /**
      * The method of the request made. Can be POST, PUT, GET or DELETE
