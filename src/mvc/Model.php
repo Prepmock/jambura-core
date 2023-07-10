@@ -329,4 +329,17 @@ class Model
         }
         return $data;
     }
+    
+    /**
+     * checks if the record already exists in the table or not
+     * 
+     * if the record exists, it returns false
+     * if a new record is added, it returns true
+     * 
+     * @return bool
+     */
+    public function isNewRecord(): bool
+    {
+        return $this->table->id() === null;
+    }
 }
