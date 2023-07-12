@@ -311,6 +311,7 @@ class Model
      * if nothing is given in the params, it will simply return an Idiorm Object.
      * if the given type is stack, it will return jStack containing the found data.
      * if the given type is queue, it will return jQueue containing the found data.
+     * if the given type is csv, it will return the found data into csv formatted string.
      * 
      * @param string $type
      * 
@@ -325,6 +326,9 @@ class Model
                 break;
             case 'queue':
                 $data = new jQueue($data);
+                break;
+            case 'csv':
+                $data =  $this->convertListOfIdiormObjectsToCSV($data);
                 break;
         }
         return $data;
@@ -341,5 +345,25 @@ class Model
     public function isNewRecord(): bool
     {
         return $this->table->id() === null;
+    }
+
+    /**
+     * convert a list of Idiorm Objects into CSV format string and returns it
+     *
+     * @param array $data
+     *
+     * @return string
+     */
+    private function convertListOfIdiormObjectsToCSV(array $data)
+    {
+        $headers = array_keys($data[0]->as_array());
+        $fp = fopen('php://output', 'w');
+        ob_start();
+        fputcsv($fp, $headers, ",");
+        foreach ($data as $objects) {
+            fputcsv($fp, $objects->as_array(), ",");
+        }
+        fclose($fp);
+        return ob_get_clean();
     }
 }
