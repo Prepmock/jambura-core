@@ -311,6 +311,7 @@ class Model
      * if nothing is given in the params, it will simply return an Idiorm Object.
      * if the given type is stack, it will return jStack containing the found data.
      * if the given type is queue, it will return jQueue containing the found data.
+     * if the given type is html, it will return html table of the found data.
      * 
      * @param string $type
      * 
