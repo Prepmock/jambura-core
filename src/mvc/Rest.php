@@ -111,8 +111,9 @@ abstract class Rest extends Controller
      *
      * @param string $view      name of the view to be rendered.
      * @param array  $variables list of variables to be rendered.
+     * @param bool $render render or echo the view
      */
-    public function render($view, $variables = array())
+    public function render($view, $variables = array(), $render = true)
     {
         $this->loadResponseHeader();
         parent::render($view, $variables);

@@ -73,7 +73,7 @@ class Controller
         }
     }
 
-    public function render($view, $variables = array())
+    public function render($view, $variables = array(), $render = true)
     {
         if (!file_exists($viewFile = JAMBURA_VIEWS . $view . '.php')) {
             throw new Exception('View file not found :' . $viewFile);
@@ -95,6 +95,9 @@ class Controller
                 include(JAMBURA_TEMPLATES . $this->template . '/layouts/' . $this->layout . '/footer.php');
             }
             $renderedView = ob_get_clean();
+            if (!$render) {
+                return $renderedView;
+            }
             echo $renderedView;
         }
         $this->end();
@@ -183,5 +186,22 @@ class Controller
     public function end()
     {
         // empty
+    }
+
+    /**
+     * Caches the rendered view and echoes the cached content.
+     *
+     * @param string $view          The view to render.
+     * @param array  $cacheOptions  An array of cache options:
+     *                  - 'key': The cache key to store the view content.
+     *                  - 'expiry': The expiration time for the cached content.
+     * @return void
+     */
+    public function cacheAndRender($view, $cacheOptions)
+    {
+        $viewData = $this->render($view, array(), false);
+        $this->cache->cacheView($cacheOptions['key'], $viewData, $cacheOptions['expiry']);
+        echo $this->cache->get($cacheOptions['key']);
+        return;
     }
 }
