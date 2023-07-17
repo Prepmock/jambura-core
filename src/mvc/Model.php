@@ -321,10 +321,10 @@ class Model
         $data = $this->table->find_many();
         switch (strtolower($type)) {
             case 'stack':
-                $data = new jStack($data);
+                $data = new \jStack($data);
                 break;
             case 'queue':
-                $data = new jQueue($data);
+                $data = new \jQueue($data);
                 break;
         }
         return $data;
