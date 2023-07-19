@@ -352,19 +352,6 @@ class jCache
   }
 
   /**
-   * Caches a view content with the specified cache key and expiration time.
-   *
-   * @param string $cacheKey      The cache key to store the view content.
-   * @param string $view          The view content to cache.
-   * @param int    $expiration    Optional. The expiration time for the cached content. Default is 0 (no expiration).
-   * @return void
-   */
-  public function cacheView($cacheKey, $view, $expiration = 0)
-  {
-    $this->store($cacheKey, $view, $expiration);
-  }
-
-  /**
    * Checks if a cache key is available.
    *
    * @param string $cacheKey The cache key to check.

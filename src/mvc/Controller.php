@@ -73,7 +73,7 @@ class Controller
         }
     }
 
-    public function render($view, $variables = array(), $render = true)
+    public function render($view, $variables = array())
     {
         if (!file_exists($viewFile = JAMBURA_VIEWS . $view . '.php')) {
             throw new Exception('View file not found :' . $viewFile);
@@ -95,9 +95,6 @@ class Controller
                 include(JAMBURA_TEMPLATES . $this->template . '/layouts/' . $this->layout . '/footer.php');
             }
             $renderedView = ob_get_clean();
-            if (!$render) {
-                return $renderedView;
-            }
             echo $renderedView;
         }
         $this->end();
@@ -199,9 +196,11 @@ class Controller
      */
     public function cacheAndRender($view, $cacheOptions)
     {
-        $viewData = $this->render($view, array(), false);
-        $this->cache->cacheView($cacheOptions['key'], $viewData, $cacheOptions['expiry']);
-        echo $this->cache->get($cacheOptions['key']);
-        return;
+        ob_start();
+        $this->render($view);
+        $response = ob_get_clean();
+
+        $this->cache->store($cacheOptions['key'], $response, $cacheOptions['expiry']);
+        echo $response;
     }
 }
