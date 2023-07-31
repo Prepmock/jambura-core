@@ -1,6 +1,6 @@
 <?php
 namespace Jambura\Mvc;
-
+use Jambura\Acl;
 class Controller
 {
     protected $loadTemplate = true;
@@ -201,47 +201,12 @@ class Controller
      */
     private function filterAccessControl()
     {
-        $controller = $_GET['controller'];
-        $action = $_GET['action'];
-        $accessMethod = '';
-
         // Show default index if no specific action is set 
-        if (!isset($action)) {
-            header('location:/' . $controller . '/' . 'index');
-        }
+        $action = isset($_GET['action']) ? $_GET['action'] : 'index';
 
-        // Collect access rules from the mentioned controller
-        $accessRules = $this->accessRules();
-
-        // Collect custom message from the controller or show default message if not exists
-        $message = $accessRules[$action]['message'] ?? 'Access Denied';
-
-        // Get the universal access method applicable for all the actions defined in the controller
-        if (array_key_exists('*', $accessRules)) {
-            $accessMethod = $accessRules['*'][0] ?? '';
-            $params = $accessRules['*']['params'] ?? '';
-        }
-
-        // Get the specific access method applicable for a certain action defined in the controller
-        if (array_key_exists($action, $accessRules)) {
-            $accessMethod = $accessRules[$action][0] ?? '';
-            $params = $accessRules[$action]['params'] ?? '';
-        }
-
-        // Validates access rules based on types of the access method        
-        if (
-            (
-                gettype($accessMethod) === 'string' &&
-                $accessMethod != '' &&
-                !$accessMethod($params)
-            ) ||
-            (
-                gettype($accessMethod) === 'object' &&
-                $accessMethod != '' &&
-                !$this->{$accessRules[$action][1]}($params)
-            )
-        ) {
-            throw new jamexBadMethod($message, 401);
-        }
+        // Uses helper class to set the access rules and filter access
+        Acl::init()
+            ->setRules($this->accessRules())
+            ->checkAccess($action);  
     }
 }
