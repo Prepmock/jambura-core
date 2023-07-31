@@ -321,12 +321,25 @@ class Model
         $data = $this->table->find_many();
         switch (strtolower($type)) {
             case 'stack':
-                $data = new jStack($data);
+                $data = new \jStack($data);
                 break;
             case 'queue':
-                $data = new jQueue($data);
+                $data = new \jQueue($data);
                 break;
         }
         return $data;
+    }
+    
+    /**
+     * checks if the record already exists in the table or not
+     * 
+     * if the record exists, it returns false
+     * if a new record is added, it returns true
+     * 
+     * @return bool
+     */
+    public function isNewRecord(): bool
+    {
+        return $this->table->id() === null;
     }
 }

@@ -21,7 +21,14 @@
             "name": "Kamrul Khan"
         }
     ],
+    "repositories": [
+        {
+            "type": "vcs",
+            "url": "https://github.com/Prepmock/idiorm.git"
+        }
+    ],
     "require": {
+        "prepmock/idiorm": "dev-master",
         "robmorgan/phinx": "0.11.6"
     }
 }

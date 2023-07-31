@@ -1,6 +1,7 @@
 <?php
 namespace Jambura\Mvc;
 use Jambura\Acl;
+
 class Controller
 {
     protected $loadTemplate = true;
@@ -185,7 +186,7 @@ class Controller
     {
         // empty
     }
-
+    
     protected function accessRules(): array
     {
         return [];
