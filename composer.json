@@ -29,6 +29,7 @@
     ],
     "require": {
         "prepmock/idiorm": "dev-master",
-        "robmorgan/phinx": "0.11.6"
+        "robmorgan/phinx": "0.11.6",
+        "splitbrain/php-cli": "^1.2"
     }
 }
