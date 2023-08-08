@@ -351,4 +351,49 @@ class jCache
     return $this->_extension;
   }
 
+  /**
+   * Checks if a cache key is available.
+   *
+   * @param string $cacheKey The cache key to check.
+   * @return bool True if the cache key is available, false otherwise.
+   */
+  public function isAvailable($cacheKey)
+  {
+    $cachedData = $this->_loadCacheByKey($cacheKey);
+
+    if ($cachedData === null) {
+      return false;
+    }
+    if ($this->_checkExpired($cachedData['time'], $cachedData['expire'])) {
+      $this->erase($cacheKey);
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * Retrieves the cached data associated with a cache key.
+   *
+   * @param string $cacheKey The cache key to retrieve the data for.
+   * @return mixed|null The cached data, or null if the cache key doesn't exist or has no data.
+   */
+  public function get($cacheKey)
+  {
+    $cachedData = $this->_loadCacheByKey($cacheKey);
+    return isset($cachedData['data']) ? unserialize($cachedData['data']) : null;
+  }
+
+  /**
+   * Retrieves the cached info associated with a cache key from the overall cache data.
+   *
+   * @param string $cacheKey The cache key to retrieve the data for.
+   * @return mixed|null The cached data, or null if the cache key doesn't exist.
+   */
+  public function _loadCacheByKey($cacheKey)
+  {
+    $cachedData = $this->_loadCache();
+    return isset($cachedData[$cacheKey]) ?
+      $cachedData[$cacheKey] : null;
+  }
+
 }

@@ -142,12 +142,8 @@ class Model
         if (!class_exists($class)) {
             throw new Exception("No model for the table $table found");
         }
-        if ($id) {
-            $model = new $class($id);
-        } else {
-            $model = new $class();
-        }
-        return $model;
+
+        return $id ? new $class($id) : new $class();
     }
 
     public static function factory($table, $id = 0)
