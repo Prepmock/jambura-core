@@ -140,7 +140,7 @@ class Model
     {
         $class = 'Model_' . $table;
         if (!class_exists($class)) {
-            throw new Exception("No model for the table $table found");
+            throw new \Exception("No model for the table $table found");
         }
 
         return $id ? new $class($id) : new $class();
@@ -219,7 +219,7 @@ class Model
     public function add($data)
     {
         if (!is_array($data)) {
-            throw new Exception('Data must be supplied as array');
+            throw new \Exception('Data must be supplied as array');
         }
         $this->table->create();
         foreach ($data as $column => $value) {
