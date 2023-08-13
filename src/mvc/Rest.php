@@ -125,12 +125,12 @@ abstract class Rest extends Controller
      * Sets content-type header for HTTP response. Checks if the requested 
      * content-type is supported or not.
      *
-     * @throws Exception if supplied content-type is not supported
+     * @throws \Exception if supplied content-type is not supported
      */
     protected function setResponseType($contentType)
     {
         if (!array_key_exists($contentType, $this->supportedContentTypes)) {
-            throw new Exception("content-type: $contentType not supported");
+            throw new \Exception("content-type: $contentType not supported");
         }
         $this->responseContentType = $contentType;
     }
@@ -226,7 +226,7 @@ abstract class Rest extends Controller
      */
     private function formatXML(array $response)
     {
-        $xml = new SimpleXMLElement('<root/>');
+        $xml = new \SimpleXMLElement('<root/>');
         array_walk_recursive($response, array($xml, 'addChild'));
         return $xml->asXML();
     }

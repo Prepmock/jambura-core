@@ -14,7 +14,7 @@ class Router
             } else {
                 // FIXME rather than throwing exception this should display a 
                 // default 404 page.
-                throw new jamexBadController('Invalid controller file : ' . $controller);
+                throw new \jamexBadController('Invalid controller file : ' . $controller);
             }
 
             $this->action = isset($_GET['action']) ? 'action_' . $_GET['action'] : 'action_index';
@@ -30,7 +30,7 @@ class Router
     {
         if ($this->controller) {
             if (!method_exists($this->controller, $this->action)) {
-                throw new jamexBadAction("Action: $this->action does not exist");
+                throw new \jamexBadAction("Action: $this->action does not exist");
 
             }
             $action = $this->action;
@@ -41,7 +41,7 @@ class Router
 
     public static function showErrorPage($page, \Exception $e, $forceErrorReport = false)
     {
-        Logger::error($e->getMessage());
+        \Logger::error($e->getMessage());
         if (JAMBURA_MOD == 'DEV' || $forceErrorReport) {
             $whoops = new \Whoops\Run;
             $whoops->allowQuit(false);
@@ -58,9 +58,9 @@ class Router
             $_GET['action'] = $page[1];
 
             try {
-                (new jRouter())->route()->display();
+                (new \jRouter())->route()->display();
             } catch (\Exception $e) {
-                jRouter::showErrorPage('', $e, true);
+                \jRouter::showErrorPage('', $e, true);
             }
         } else {
             include($page);

@@ -76,7 +76,7 @@ class Controller
     public function render($view, $variables = array())
     {
         if (!file_exists($viewFile = JAMBURA_VIEWS . $view . '.php')) {
-            throw new Exception('View file not found :' . $viewFile);
+            throw new \Exception('View file not found :' . $viewFile);
         }
 
         if ($this->parseApi) {
