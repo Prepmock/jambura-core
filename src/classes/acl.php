@@ -1,5 +1,5 @@
 <?php
-namespace Jambura;
+namespace Jambura\Classes;
 class Acl
 {
     private $rules;
