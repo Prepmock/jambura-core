@@ -78,7 +78,7 @@ class Controller
     public function render($view, $variables = array())
     {
         if (!file_exists($viewFile = JAMBURA_VIEWS . $view . '.php')) {
-            throw new Exception('View file not found :' . $viewFile);
+            throw new \Exception('View file not found :' . $viewFile);
         }
 
         if ($this->parseApi) {
@@ -209,5 +209,24 @@ class Controller
         Acl::init()
             ->setRules($this->accessRules())
             ->checkAccess($action);  
+    }
+
+    /**
+     * Caches the rendered view and echoes the cached content.
+     *
+     * @param string $view          The view to render.
+     * @param array  $cacheOptions  An array of cache options:
+     *                  - 'key': The cache key to store the view content.
+     *                  - 'expiry': The expiration time for the cached content.
+     * @return void
+     */
+    public function cacheAndRender($view, $cacheOptions)
+    {
+        ob_start();
+        $this->render($view);
+        $response = ob_get_clean();
+
+        $this->cache->store($cacheOptions['key'], $response, $cacheOptions['expiry']);
+        echo $response;
     }
 }

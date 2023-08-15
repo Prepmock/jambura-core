@@ -140,14 +140,10 @@ class Model
     {
         $class = 'Model_' . $table;
         if (!class_exists($class)) {
-            throw new Exception("No model for the table $table found");
+            throw new \Exception("No model for the table $table found");
         }
-        if ($id) {
-            $model = new $class($id);
-        } else {
-            $model = new $class();
-        }
-        return $model;
+
+        return $id ? new $class($id) : new $class();
     }
 
     public static function factory($table, $id = 0)
@@ -223,7 +219,7 @@ class Model
     public function add($data)
     {
         if (!is_array($data)) {
-            throw new Exception('Data must be supplied as array');
+            throw new \Exception('Data must be supplied as array');
         }
         $this->table->create();
         foreach ($data as $column => $value) {
