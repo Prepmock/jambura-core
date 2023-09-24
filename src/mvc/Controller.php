@@ -1,6 +1,7 @@
 <?php
 namespace Jambura\Mvc;
 use Jambura\Acl;
+use Jambura\Classes\AccessControl;
 
 class Controller
 {
@@ -206,7 +207,7 @@ class Controller
         $action = isset($_GET['action']) ? $_GET['action'] : 'index';
 
         // Uses helper class to set the access rules and filter access
-        Acl::init()
+        AccessControl::init()
             ->setRules($this->accessRules())
             ->checkAccess($action);  
     }
