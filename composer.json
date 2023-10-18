@@ -13,7 +13,8 @@
             "src/helpers/jexceptions.php", 
             "src/helpers/jflash.php",
             "src/helpers/jmodel.php",
-            "src/helpers/jrouter.php"
+            "src/helpers/jrouter.php",
+            "src/jambura.php"
         ]
     },
     "authors": [
