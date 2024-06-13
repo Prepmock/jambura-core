@@ -25,5 +25,8 @@
     "require": {
         "prepmock/idiorm": "v1.0.0",
         "robmorgan/phinx": "0.11.6"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.3"
     }
 }
