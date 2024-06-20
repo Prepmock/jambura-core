@@ -307,6 +307,7 @@ class Model
      * if nothing is given in the params, it will simply return an Idiorm Object.
      * if the given type is stack, it will return jStack containing the found data.
      * if the given type is queue, it will return jQueue containing the found data.
+     * if the given type is html, it will return html table of the found data.
      * 
      * @param string $type
      * 
@@ -321,6 +322,9 @@ class Model
                 break;
             case 'queue':
                 $data = new \jQueue($data);
+                break;
+            case 'html':
+                $data = $this->convertListOfIdiormObjectToHtmlTable($data);
                 break;
         }
         return $data;
@@ -337,5 +341,36 @@ class Model
     public function isNewRecord(): bool
     {
         return $this->table->id() === null;
+    }
+
+    /**
+     * Converts an array of idiorm object into an html table code 
+     * and return it as a string.
+     *
+     * @param array $data
+     * 
+     * @return string
+     */
+    private function convertListOfIdiormObjectToHtmlTable($data)
+    {
+        if (!isset($data)) {
+            return '<table></table>';
+        }
+
+        $html = '<table> <tr>';
+        foreach ($data[0]->as_array() as $attribute => $value) {
+            $html .= "<th>$attribute</th>";
+        }
+        $html .= '</tr>';
+
+        foreach ($data as $object) {
+            $html .= '<tr>';
+            foreach ($object->as_array() as $value) {
+                $html .= "<td>$value</td>";
+            }
+            $html .= '</tr>';
+        }
+
+        return $html . '</table>';
     }
 }
