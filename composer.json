@@ -4,7 +4,8 @@
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "Jambura\\Mvc\\": "src/mvc/"
+            "Jambura\\Mvc\\": "src/mvc/",
+            "Jambura\\Classes\\": "src/classes/"
         },
         "files": [
             "src/helpers/jassets.php",

@@ -1,5 +1,7 @@
 <?php
 namespace Jambura\Mvc;
+use Jambura\Acl;
+use Jambura\Classes\AccessControl;
 
 class Controller
 {
@@ -36,6 +38,7 @@ class Controller
 
         $this->data['jFlash'] = new \jFlash();
         $this->init();
+        $this->filterAccessControl();
     }
 
     public function __set($var, $value)
@@ -183,6 +186,30 @@ class Controller
     public function end()
     {
         // empty
+    }
+    
+    protected function accessRules(): array
+    {
+        return [];
+    }
+
+    /**
+     * Grants access to an action based on the controller provided access rules.
+     *  
+     * If access is granted, it proceeds to display the action.
+     * If access is not granted, it displays an error code.
+     * 
+     * @return void
+     */
+    private function filterAccessControl()
+    {
+        // Show default index if no specific action is set 
+        $action = isset($_GET['action']) ? $_GET['action'] : 'index';
+
+        // Uses helper class to set the access rules and filter access
+        AccessControl::init()
+            ->setRules($this->accessRules())
+            ->checkAccess($action);  
     }
 
     /**
