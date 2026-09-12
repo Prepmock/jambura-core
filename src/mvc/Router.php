@@ -8,7 +8,9 @@ class Router
 
     public function route($namespace = '')
     {
-        if ($controller = $_GET['controller']) {
+        // ?? rather than a bare read: a missing key is a warning from PHP 8, and
+        // in DEV it prints before the redirect below, so the header never goes.
+        if ($controller = $_GET['controller'] ?? null) {
             if (file_exists(JAMBURA_CONTROLLERS . $controller . '.php')) {
                 include(JAMBURA_CONTROLLERS . $controller . '.php');
             } else {
