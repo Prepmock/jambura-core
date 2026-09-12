@@ -7,17 +7,22 @@ defines a handful of constants and hands the request to the router.
 
 ## Requirements
 
-| jambura-core | PHP | idiorm | Phinx |
-|---|---|---|---|
-| **3.x** | 8.1 or later | `prepmock/idiorm` ^2.0 | ^0.16 |
-| 2.x | 7.x | `prepmock/idiorm` v1.0.0 | 0.11.6 |
+- **PHP 8.1 or later** for 3.x. Use 2.x on PHP 7.
+- **PDO**, with the driver for your database.
+- For clean URLs, a web server that rewrites them onto `index.php` (see [Routing](#routing)).
 
-You also need PDO with the driver for your database. Clean URLs need a web server that
-can rewrite them onto `index.php` (see [Routing](#routing)).
+## Installation
 
 ```bash
 composer require prepmock/jambura-core:^3.0
 ```
+
+Composer installs idiorm and Phinx along with the framework:
+
+| jambura-core | idiorm | Phinx |
+|---|---|---|
+| **3.x** | `prepmock/idiorm` ^2.0 | ^0.16 |
+| 2.x | `prepmock/idiorm` v1.0.0 | 0.11.6 |
 
 Composer autoloads everything the framework ships: `Jambura\Mvc\*` by PSR-4, the global
 helpers (`jRouter`, `jController`, `jModel`, `jAssets`, `jFlash`, `jCache`, the `jamex*`
