@@ -77,6 +77,11 @@ class Model
                 $data = $table->find_one();
             } elseif ($info['type'] == '1-M') {
                 $data = $table->find_many();
+            } else {
+                // An unknown type loads nothing, rather than storing an unset
+                // $data: PHP 8 raised reading one from a notice to a warning,
+                // printed into the response. __get() answers false either way.
+                continue;
             }
             $this->reldata[$key] = $data;
         }
@@ -196,9 +201,16 @@ class Model
     public function each()
     {
         if ($this->count() && is_array($this->table)) {
-            $col = each($this->table);
-            //print_r($col);
-            return $col === false ? $col : $col[1];
+            // key()/current()/next() rather than each(), which PHP 8 removed —
+            // calling this method was a fatal error. They reproduce it exactly:
+            // the current value, the pointer advanced, false once it has run
+            // off the end, and reset() still rewinding it.
+            if (key($this->table) === null) {
+                return false;
+            }
+            $value = current($this->table);
+            next($this->table);
+            return $value;
         } elseif (
             $this->count()
             && is_object($this->table)

@@ -69,7 +69,11 @@ class Controller
             if ($key == 'controller' || $key == 'action') {
                 continue;
             }
-            $this->data[$prefix . $key] = urldecode($value);
+            // Arrays pass through untouched (?ids[]=1&ids[]=2): urldecode() takes
+            // only a string, and PHP 8 throws a TypeError where 7 warned and
+            // returned null. $_REQUEST values are decoded already, so skipping
+            // the call loses nothing.
+            $this->data[$prefix . $key] = is_string($value) ? urldecode($value) : $value;
         }
     }
 
