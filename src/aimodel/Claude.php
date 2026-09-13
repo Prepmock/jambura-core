@@ -127,7 +127,17 @@ class Claude extends LLM
             if (!class_exists(Client::class)) {
                 throw new LLMException('The Claude adapter needs the Anthropic SDK: composer require anthropic-ai/sdk');
             }
-            $this->client = new Client();
+            try {
+                $this->client = new Client();
+            } catch (\RuntimeException $e) {
+                // The SDK finds a PSR-18 HTTP client at construction and throws if there is none.
+                throw new LLMException(
+                    'The Anthropic SDK could not start: ' . $e->getMessage()
+                    . ' Install an HTTP client, for example composer require guzzlehttp/guzzle',
+                    0,
+                    $e
+                );
+            }
         }
         return $this->client;
     }
