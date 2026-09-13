@@ -24,7 +24,8 @@ Composer installs idiorm and Phinx along with the framework:
 | **3.x** | `prepmock/idiorm` ^2.0 | ^0.16 |
 | 2.x | `prepmock/idiorm` v1.0.0 | 0.11.6 |
 
-Composer autoloads everything the framework ships: `Jambura\Mvc\*` by PSR-4, the global
+Composer autoloads everything the framework ships: `Jambura\Mvc\*`, `Jambura\LLM\*` and
+`AIModel\*` by PSR-4, the `Jambura\LLM` class by classmap, the global
 helpers (`jRouter`, `jController`, `jModel`, `jAssets`, `jFlash`, `jCache`, the `jamex*`
 exceptions) and the `Jambura` bootstrap class as autoload files, and idiorm's `ORM` by
 classmap. **Do not include files from `vendor/` by hand.** A second include of an
@@ -322,6 +323,54 @@ Jambura\Mvc\Model::factory('books')->add([
 application must provide. With `JAMBURA_MOD` set to `'DEV'` it renders the exception with
 [filp/whoops](https://github.com/filp/whoops), which is not a dependency of this package,
 so require it yourself if you use this.
+
+## LLM adapters
+
+`Jambura\LLM` sends a structured prompt to any registered model adapter. Your code
+builds one `Jambura\LLM\Prompt` and never formats text for a particular model. Each
+adapter turns the prompt into the request its own API expects.
+
+```php
+use Jambura\LLM;
+use Jambura\LLM\Prompt;
+
+// Once, at bootstrap. A class that doesn't exist or isn't an adapter throws here.
+LLM::registerModels([
+    AIModel\Claude::class,
+    AIModel\Deepseek::class,
+]);
+
+$prompt = Prompt::create()
+    ->setType('voyage-summary')                  // for routing; never sent to the model
+    ->setRole('You are a shipping analyst.')
+    ->addContext('static', 'Port rules: ...')
+    ->addContext('retrieved', $eta, $berth)      // static, retrieved, dynamic or conversation
+    ->addInstruction('Be brief.', 'Cite the context you use.')
+    ->setTask('Summarize the delay for the charterer.');
+
+$reply = LLM::use(AIModel\Claude::class)->prompt($prompt);   // the reply text
+```
+
+- `prompt()` only takes a `Prompt`. It throws `Jambura\LLM\LLMException` when the prompt
+  has no task, the API call fails, or the model declines the request.
+- `use()` builds an adapter on first use and returns that same instance after. Using a
+  class that was never registered throws. `forgetModels()` empties the registry.
+- Every adapter puts the task last, and leaves out empty context sections.
+- `serialize($prompt)` returns the request body an adapter would send, without calling
+  the API.
+
+| Adapter | Default model | Needs | Sends |
+|---|---|---|---|
+| `AIModel\Claude` | `claude-opus-5` | `composer require anthropic-ai/sdk guzzlehttp/guzzle` (the SDK needs a PSR-18 HTTP client; Guzzle is one), plus `ANTHROPIC_API_KEY` or `setClient()` | the role as the system prompt; context, instructions and task as XML sections |
+| `AIModel\Deepseek` | `deepseek-v4-pro` | the curl extension, plus `DEEPSEEK_API_KEY` or `setApiKey()` | the role as the system message; context, instructions and task as a JSON document |
+
+`setModel()` changes either adapter's model, and Claude also has `setMaxTokens()`
+(default 16000). The Claude adapter opts into Anthropic's server-side fallbacks, so a
+request Claude declines is retried on a fallback model before anything throws.
+
+To add a model, extend `Jambura\LLM`, implement `serialize(Prompt $prompt): array` and
+`send(array $payload): string`, then register the class. `use()` builds adapters through
+a final, protected constructor, so give an adapter its defaults as property values.
 
 ## Migrations
 
