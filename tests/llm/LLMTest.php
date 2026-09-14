@@ -57,14 +57,14 @@ class LLMTest extends TestCase
         LLM::registerModels([FakeModel::class]);
 
         $this->expectException(LLMException::class);
-        $this->expectExceptionMessage('Model class AIModel\Claude is not registered');
-        LLM::use('\AIModel\Claude');
+        $this->expectExceptionMessage('Model class OtherModel is not registered');
+        LLM::use('\OtherModel');
     }
 
     public static function invalidModelProvider(): array
     {
         return [
-            'missing class' => ['AIModel\Nope', 'does not exist'],
+            'missing class' => ['NoSuchModel', 'does not exist'],
             'not an adapter' => [stdClass::class, 'must be a concrete subclass'],
             'abstract adapter' => [AbstractFakeModel::class, 'must be a concrete subclass'],
         ];

@@ -7,7 +7,8 @@ use Jambura\LLM\Prompt;
 /**
  * Registry of model adapters, and the contract each adapter implements.
  *
- * Register adapters once, then resolve one by class name:
+ * The framework ships no adapters. An application extends this class once per
+ * model it uses, registers those classes, then resolves one by class name:
  *
  *     \Jambura\LLM::registerModels([\AIModel\Claude::class, \AIModel\Deepseek::class]);
  *     \Jambura\LLM::use(\AIModel\Claude::class)->prompt($prompt);
@@ -116,6 +117,9 @@ abstract class LLM
 
     /**
      * Builds the request body this adapter's API expects from a prompt.
+     *
+     * Render the task last: the end of a prompt carries the most weight. Make
+     * no network calls here, so tests can check the exact request.
      *
      * @return array the request body, before JSON encoding
      */

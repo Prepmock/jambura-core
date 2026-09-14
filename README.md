@@ -24,8 +24,8 @@ Composer installs idiorm and Phinx along with the framework:
 | **3.x** | `prepmock/idiorm` ^2.0 | ^0.16 |
 | 2.x | `prepmock/idiorm` v1.0.0 | 0.11.6 |
 
-Composer autoloads everything the framework ships: `Jambura\Mvc\*`, `Jambura\LLM\*` and
-`AIModel\*` by PSR-4, the `Jambura\LLM` class by classmap, the global
+Composer autoloads everything the framework ships: `Jambura\Mvc\*` and `Jambura\LLM\*` by
+PSR-4, the `Jambura\LLM` class by classmap, the global
 helpers (`jRouter`, `jController`, `jModel`, `jAssets`, `jFlash`, `jCache`, the `jamex*`
 exceptions) and the `Jambura` bootstrap class as autoload files, and idiorm's `ORM` by
 classmap. **Do not include files from `vendor/` by hand.** A second include of an
@@ -326,51 +326,90 @@ so require it yourself if you use this.
 
 ## LLM adapters
 
-`Jambura\LLM` sends a structured prompt to any registered model adapter. Your code
-builds one `Jambura\LLM\Prompt` and never formats text for a particular model. Each
-adapter turns the prompt into the request its own API expects.
+`Jambura\LLM` gives every model the same interface. Your code builds one
+`Jambura\LLM\Prompt` and hands it to a model adapter, and only the adapter knows how that
+model's API wants the prompt formatted and called. The framework ships no adapters: you
+write one class per model you use, and register it.
+
+**A prompt** keeps its parts separate, so each adapter can format them its own way:
 
 ```php
-use Jambura\LLM;
 use Jambura\LLM\Prompt;
 
-// Once, at bootstrap. A class that doesn't exist or isn't an adapter throws here.
-LLM::registerModels([
-    AIModel\Claude::class,
-    AIModel\Deepseek::class,
-]);
-
 $prompt = Prompt::create()
-    ->setType('voyage-summary')                  // for routing; never sent to the model
+    ->setType('voyage-summary')                  // for routing; adapters don't send it
     ->setRole('You are a shipping analyst.')
     ->addContext('static', 'Port rules: ...')
     ->addContext('retrieved', $eta, $berth)      // static, retrieved, dynamic or conversation
     ->addInstruction('Be brief.', 'Cite the context you use.')
     ->setTask('Summarize the delay for the charterer.');
-
-$reply = LLM::use(AIModel\Claude::class)->prompt($prompt);   // the reply text
 ```
 
-- `prompt()` only takes a `Prompt`. It throws `Jambura\LLM\LLMException` when the prompt
-  has no task, the API call fails, or the model declines the request.
-- `use()` builds an adapter on first use and returns that same instance after. Using a
+`getContext()` returns only the sections that have items, always in the order listed
+above. An unknown section name throws `Jambura\LLM\LLMException`.
+
+**An adapter** extends `Jambura\LLM` and implements `serialize()`, which turns a prompt
+into the request body the model's API expects, and `send()`, which makes the call and
+returns the reply text:
+
+```php
+<?php
+namespace AIModel;
+
+use Jambura\LLM;
+use Jambura\LLM\Prompt;
+
+class Example extends LLM
+{
+    protected string $model = 'example-large';
+
+    public function serialize(Prompt $prompt): array
+    {
+        $document = array_filter([
+            'context'      => $prompt->getContext(),
+            'instructions' => $prompt->getInstructions(),
+        ]);
+        $document['task'] = $prompt->getTask();   // last: the end of a prompt carries the most weight
+
+        return [
+            'model'    => $this->model,
+            'messages' => [
+                ['role' => 'system', 'content' => (string) $prompt->getRole()],
+                ['role' => 'user', 'content' => json_encode($document)],
+            ],
+        ];
+    }
+
+    protected function send(array $payload): string
+    {
+        // Call the model's API with your HTTP client or the provider's SDK, and return
+        // the reply text. Throw Jambura\LLM\LLMException when the call fails.
+    }
+}
+```
+
+**Register adapters once**, at bootstrap, then use them anywhere:
+
+```php
+use Jambura\LLM;
+
+LLM::registerModels([AIModel\Example::class, AIModel\Another::class]);
+
+$reply = LLM::use(AIModel\Example::class)->prompt($prompt);
+```
+
+- `registerModels()` checks each class straight away. A class that doesn't exist, doesn't
+  extend `Jambura\LLM`, or is abstract throws `LLMException` at bootstrap, not on the
+  first prompt.
+- `use()` builds an adapter the first time and returns that same instance after. Using a
   class that was never registered throws. `forgetModels()` empties the registry.
-- Every adapter puts the task last, and leaves out empty context sections.
-- `serialize($prompt)` returns the request body an adapter would send, without calling
-  the API.
-
-| Adapter | Default model | Needs | Sends |
-|---|---|---|---|
-| `AIModel\Claude` | `claude-opus-5` | `composer require anthropic-ai/sdk guzzlehttp/guzzle` (the SDK needs a PSR-18 HTTP client; Guzzle is one), plus `ANTHROPIC_API_KEY` or `setClient()` | the role as the system prompt; context, instructions and task as XML sections |
-| `AIModel\Deepseek` | `deepseek-v4-pro` | the curl extension, plus `DEEPSEEK_API_KEY` or `setApiKey()` | the role as the system message; context, instructions and task as a JSON document |
-
-`setModel()` changes either adapter's model, and Claude also has `setMaxTokens()`
-(default 16000). The Claude adapter opts into Anthropic's server-side fallbacks, so a
-request Claude declines is retried on a fallback model before anything throws.
-
-To add a model, extend `Jambura\LLM`, implement `serialize(Prompt $prompt): array` and
-`send(array $payload): string`, then register the class. `use()` builds adapters through
-a final, protected constructor, so give an adapter its defaults as property values.
+- `prompt()` only accepts a `Prompt`, throws if it has no task, and returns
+  `send(serialize($prompt))`.
+- `use()` builds adapters through a final, protected constructor, so `new` can't be used.
+  Give an adapter its defaults as property values and its settings through setters.
+  `setModel()` and `getModel()` are already there for the model id.
+- Keep `serialize()` free of network calls, so a test can assert the exact request an
+  adapter builds.
 
 ## Migrations
 
