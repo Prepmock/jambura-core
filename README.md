@@ -24,7 +24,8 @@ Composer installs idiorm and Phinx along with the framework:
 | **3.x** | `prepmock/idiorm` ^2.0 | ^0.16 |
 | 2.x | `prepmock/idiorm` v1.0.0 | 0.11.6 |
 
-Composer autoloads everything the framework ships: `Jambura\Mvc\*` by PSR-4, the global
+Composer autoloads everything the framework ships: `Jambura\Mvc\*` and `Jambura\LLM\*` by
+PSR-4, the `Jambura\LLM` class by classmap, the global
 helpers (`jRouter`, `jController`, `jModel`, `jAssets`, `jFlash`, `jCache`, the `jamex*`
 exceptions) and the `Jambura` bootstrap class as autoload files, and idiorm's `ORM` by
 classmap. **Do not include files from `vendor/` by hand.** A second include of an
@@ -322,6 +323,134 @@ Jambura\Mvc\Model::factory('books')->add([
 application must provide. With `JAMBURA_MOD` set to `'DEV'` it renders the exception with
 [filp/whoops](https://github.com/filp/whoops), which is not a dependency of this package,
 so require it yourself if you use this.
+
+## LLM adapters
+
+`Jambura\LLM` gives every model the same interface. Your code builds one
+`Jambura\LLM\Prompt` and hands it to a model adapter, and only the adapter knows how that
+model's API wants the prompt formatted and called. The framework ships no adapters: you
+write one class per model you use, and register it.
+
+**A prompt** keeps its parts separate, so each adapter can format them its own way:
+
+```php
+use Jambura\LLM\Prompt;
+
+$prompt = Prompt::create()
+    ->setType('voyage-summary')                  // for routing; adapters don't send it
+    ->setRole('You are a shipping analyst.')
+    ->addContext('static', 'Port rules: ...')
+    ->addContext('retrieved', $eta, $berth)      // static, retrieved, dynamic or conversation
+    ->addInstruction('Be brief.', 'Cite the context you use.')
+    ->setTask('Summarize the delay for the charterer.');
+```
+
+`getContext()` returns only the sections that have items, always in the order listed
+above. An unknown section name throws `Jambura\LLM\LLMException`.
+
+**An adapter** extends `Jambura\LLM` and implements `send()`. The framework formats the
+prompt before `send()` runs, and two optional properties control how:
+
+```php
+<?php
+namespace AIModel;
+
+use Jambura\LLM;
+use Jambura\LLM\Format;
+use Jambura\LLM\Prompt;
+
+class Example extends LLM
+{
+    protected string $model = 'example-large';
+
+    // Format::Xml (the default), Format::Json or Format::Text.
+    protected Format $format = Format::Json;
+
+    // Sections rendered before the task, in this order. The default is
+    // ['role', 'context', 'instructions']. This API takes the role separately.
+    protected array $order = ['context', 'instructions'];
+
+    protected function send(string $formattedPrompt, Prompt $prompt): string
+    {
+        // Put $formattedPrompt, and $prompt->getRole() since role isn't in $order, into
+        // the request the model's API expects. Make the call with your HTTP client or the
+        // provider's SDK, and return the reply text. Throw Jambura\LLM\LLMException when
+        // the call fails.
+    }
+}
+```
+
+The same prompt in each format, with the default order:
+
+```xml
+<role>Analyst</role>
+<context>
+  <retrieved>
+    <item>ETA 14:00</item>
+  </retrieved>
+</context>
+<instructions>
+  <instruction>Be brief.</instruction>
+</instructions>
+<task>Summarize.</task>
+```
+
+```json
+{
+    "role": "Analyst",
+    "context": {
+        "retrieved": ["ETA 14:00"]
+    },
+    "instructions": ["Be brief."],
+    "task": "Summarize."
+}
+```
+
+```
+Role:
+Analyst
+
+Context (retrieved):
+- ETA 14:00
+
+Instructions:
+- Be brief.
+
+Task:
+Summarize.
+```
+
+- **The task is always rendered last**, whatever `$order` says. `$order` can reorder
+  `role`, `context` and `instructions`, or leave any of them out. Listing `task`, an
+  unknown name or the same section twice throws `LLMException` when the class is
+  registered.
+- Empty sections are left out in every format, and the prompt's `type` is never rendered.
+- XML and JSON escape the prompt's text, so a context item can't close a tag or end a
+  string early. Text can't escape anything: an item containing `Task:` reads like a
+  heading. Use Text only for content you trust.
+- For a format the list doesn't cover, override `handlePrompt(Prompt $prompt): string`.
+  Whatever it returns is passed to `send()`.
+
+**Register adapters once**, at bootstrap, then use them anywhere:
+
+```php
+use Jambura\LLM;
+
+LLM::registerModels([AIModel\Example::class, AIModel\Another::class]);
+
+$reply = LLM::use(AIModel\Example::class)->prompt($prompt);
+```
+
+- `registerModels()` checks each class straight away. A class that doesn't exist, doesn't
+  extend `Jambura\LLM`, is abstract, or has an invalid `$order` throws `LLMException` at
+  bootstrap, not on the first prompt.
+- `use()` builds an adapter the first time and returns that same instance after. Using a
+  class that was never registered throws. `forgetModels()` empties the registry.
+- `prompt()` only accepts a `Prompt`, throws if it has no task, and returns the reply from
+  `send()`.
+- `use()` builds adapters through a final, protected constructor, so `new` can't be used.
+  Give an adapter its defaults as property values and its settings through setters.
+  `setModel()` and `getModel()` are already there for the model id.
 
 ## Migrations
 
