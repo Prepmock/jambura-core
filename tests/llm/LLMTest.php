@@ -10,20 +10,30 @@ class FakeModel extends LLM
 {
     public array $sent = [];
 
-    public function serialize(Prompt $prompt): array
+    protected function send(string $formattedPrompt, Prompt $prompt): string
     {
-        return ['task' => $prompt->getTask()];
-    }
-
-    protected function send(array $payload): string
-    {
-        $this->sent[] = $payload;
+        $this->sent[] = [$formattedPrompt, $prompt];
         return 'reply';
     }
 }
 
 abstract class AbstractFakeModel extends LLM
 {
+}
+
+class TaskInOrderModel extends FakeModel
+{
+    protected array $order = ['context', 'task'];
+}
+
+class UnknownSectionModel extends FakeModel
+{
+    protected array $order = ['role', 'history'];
+}
+
+class RepeatedSectionModel extends FakeModel
+{
+    protected array $order = ['role', 'context', 'role'];
 }
 
 class LLMTest extends TestCase
@@ -67,6 +77,9 @@ class LLMTest extends TestCase
             'missing class' => ['NoSuchModel', 'does not exist'],
             'not an adapter' => [stdClass::class, 'must be a concrete subclass'],
             'abstract adapter' => [AbstractFakeModel::class, 'must be a concrete subclass'],
+            'task in order' => [TaskInOrderModel::class, 'TaskInOrderModel::$order has unknown sections: task'],
+            'unknown section in order' => [UnknownSectionModel::class, 'unknown sections: history'],
+            'repeated section in order' => [RepeatedSectionModel::class, 'lists a section more than once'],
         ];
     }
 
@@ -84,13 +97,14 @@ class LLMTest extends TestCase
         new FakeModel();
     }
 
-    public function testPromptSendsTheSerializedPrompt(): void
+    public function testPromptSendsTheFormattedPromptWithThePrompt(): void
     {
         LLM::registerModels([FakeModel::class]);
         $model = LLM::use(FakeModel::class);
+        $prompt = Prompt::create()->setTask('Summarize');
 
-        $this->assertSame('reply', $model->prompt(Prompt::create()->setTask('Summarize')));
-        $this->assertSame([['task' => 'Summarize']], $model->sent);
+        $this->assertSame('reply', $model->prompt($prompt));
+        $this->assertSame([['<task>Summarize</task>', $prompt]], $model->sent);
     }
 
     public function testPromptRequiresATask(): void

@@ -1,11 +1,12 @@
 <?php
 namespace Jambura;
 
+use Jambura\LLM\Format;
 use Jambura\LLM\LLMException;
 use Jambura\LLM\Prompt;
 
 /**
- * Registry of model adapters, and the contract each adapter implements.
+ * Registry of model adapters, and the base class each adapter extends.
  *
  * The framework ships no adapters. An application extends this class once per
  * model it uses, registers those classes, then resolves one by class name:
@@ -13,10 +14,18 @@ use Jambura\LLM\Prompt;
  *     \Jambura\LLM::registerModels([\AIModel\Claude::class, \AIModel\Deepseek::class]);
  *     \Jambura\LLM::use(\AIModel\Claude::class)->prompt($prompt);
  *
- * Each adapter is built once, on its first use(), and reused after that.
+ * An adapter implements send(), and may set $format and $order to change how
+ * the prompt is rendered. Each adapter is built once, on its first use(), and
+ * reused after that.
  */
 abstract class LLM
 {
+    /**
+     * Sections an adapter can list in $order. The task is not one of them:
+     * it is always rendered, and always last.
+     */
+    const SECTIONS = ['role', 'context', 'instructions'];
+
     /**
      * Registered adapter classes, keyed by lower-cased class name. The value is
      * the adapter instance once use() has built it, null before that.
@@ -31,6 +40,20 @@ abstract class LLM
     protected string $model = '';
 
     /**
+     * Format handlePrompt() renders the prompt in.
+     * @var Format
+     */
+    protected Format $format = Format::Xml;
+
+    /**
+     * Sections handlePrompt() renders before the task, in this order. Leave a
+     * section out to keep it out of the formatted prompt, for example a role
+     * that send() puts in the API's system field.
+     * @var string[]
+     */
+    protected array $order = self::SECTIONS;
+
+    /**
      * Adapters are built by use(), never with `new`.
      */
     final protected function __construct()
@@ -40,12 +63,13 @@ abstract class LLM
     /**
      * Registers adapter classes so use() can resolve them.
      *
-     * Checks each class up front, so a typo fails at registration rather than
-     * on the first prompt. Registering a class again keeps its instance.
+     * Checks each class up front, so a mistake fails at registration rather
+     * than on the first prompt. Registering a class again keeps its instance.
      *
      * @param string[] $classes adapter class names
      *
-     * @throws LLMException if a class does not exist or is not a concrete LLM
+     * @throws LLMException if a class does not exist, is not a concrete LLM,
+     *                      or has an invalid $order
      */
     public static function registerModels(array $classes): void
     {
@@ -54,9 +78,11 @@ abstract class LLM
             if (!class_exists($class)) {
                 throw new LLMException("Model class $class does not exist");
             }
-            if (!is_subclass_of($class, self::class) || (new \ReflectionClass($class))->isAbstract()) {
+            $reflection = new \ReflectionClass($class);
+            if (!$reflection->isSubclassOf(self::class) || $reflection->isAbstract()) {
                 throw new LLMException("Model class $class must be a concrete subclass of " . self::class);
             }
+            self::checkOrder($class, $reflection->getDefaultProperties()['order']);
             self::$models[strtolower($class)] ??= null;
         }
     }
@@ -98,7 +124,7 @@ abstract class LLM
         if ($prompt->getTask() === null || trim($prompt->getTask()) === '') {
             throw new LLMException('A prompt needs a task');
         }
-        return $this->send($this->serialize($prompt));
+        return $this->send($this->handlePrompt($prompt), $prompt);
     }
 
     /**
@@ -116,21 +142,123 @@ abstract class LLM
     }
 
     /**
-     * Builds the request body this adapter's API expects from a prompt.
+     * Renders the sections in $order, then the task, in $format.
      *
-     * Render the task last: the end of a prompt carries the most weight. Make
-     * no network calls here, so tests can check the exact request.
+     * Empty sections are left out, and the prompt's type is never rendered.
+     * Override this only for a format the Format enum does not cover.
      *
-     * @return array the request body, before JSON encoding
+     * @throws LLMException if $order is invalid
      */
-    abstract public function serialize(Prompt $prompt): array;
+    protected function handlePrompt(Prompt $prompt): string
+    {
+        self::checkOrder(static::class, $this->order);
+
+        $sections = [];
+        foreach ($this->order as $name) {
+            $value = match ($name) {
+                'role' => $prompt->getRole(),
+                'context' => $prompt->getContext(),
+                'instructions' => $prompt->getInstructions(),
+            };
+            if ($value !== null && $value !== '' && $value !== []) {
+                $sections[$name] = $value;
+            }
+        }
+        $sections['task'] = $prompt->getTask();
+
+        return match ($this->format) {
+            Format::Xml => self::toXml($sections),
+            Format::Json => json_encode(
+                $sections,
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE | JSON_THROW_ON_ERROR
+            ),
+            Format::Text => self::toText($sections),
+        };
+    }
 
     /**
-     * Sends a request body built by serialize() and returns the reply text.
+     * Sends the formatted prompt to the model and returns its reply text.
      *
-     * @param array $payload the output of serialize()
+     * Put $formattedPrompt into the request the model's API expects. $prompt
+     * is there for sections left out of $order, such as a role the API takes
+     * as a separate system field.
+     *
+     * @param string $formattedPrompt the output of handlePrompt()
+     * @param Prompt $prompt          the prompt it was rendered from
      *
      * @throws LLMException if the call fails or returns no text
      */
-    abstract protected function send(array $payload): string;
+    abstract protected function send(string $formattedPrompt, Prompt $prompt): string;
+
+    /**
+     * @throws LLMException if $order names anything but SECTIONS, or repeats one
+     */
+    private static function checkOrder(string $class, array $order): void
+    {
+        $unknown = array_diff($order, self::SECTIONS);
+        if ($unknown) {
+            throw new LLMException(
+                "$class::\$order has unknown sections: " . implode(', ', $unknown)
+                . '. Use ' . implode(', ', self::SECTIONS) . '; the task is always rendered last'
+            );
+        }
+        if (count($order) !== count(array_unique($order))) {
+            throw new LLMException("$class::\$order lists a section more than once");
+        }
+    }
+
+    /**
+     * @param array $sections section name => value, task last
+     */
+    private static function toXml(array $sections): string
+    {
+        $lines = [];
+        foreach ($sections as $name => $value) {
+            if ($name === 'context') {
+                $lines[] = '<context>';
+                foreach ($value as $section => $items) {
+                    $lines[] = "  <$section>";
+                    foreach ($items as $item) {
+                        $lines[] = '    <item>' . self::escapeXml($item) . '</item>';
+                    }
+                    $lines[] = "  </$section>";
+                }
+                $lines[] = '</context>';
+            } elseif ($name === 'instructions') {
+                $lines[] = '<instructions>';
+                foreach ($value as $instruction) {
+                    $lines[] = '  <instruction>' . self::escapeXml($instruction) . '</instruction>';
+                }
+                $lines[] = '</instructions>';
+            } else {
+                $lines[] = "<$name>" . self::escapeXml($value) . "</$name>";
+            }
+        }
+        return implode("\n", $lines);
+    }
+
+    private static function escapeXml(string $text): string
+    {
+        return htmlspecialchars($text, ENT_XML1 | ENT_NOQUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    }
+
+    /**
+     * @param array $sections section name => value, task last
+     */
+    private static function toText(array $sections): string
+    {
+        $blocks = [];
+        foreach ($sections as $name => $value) {
+            if ($name === 'context') {
+                foreach ($value as $section => $items) {
+                    $blocks[] = "Context ($section):\n- " . implode("\n- ", $items);
+                }
+            } elseif ($name === 'instructions') {
+                $blocks[] = "Instructions:\n- " . implode("\n- ", $value);
+            } else {
+                $blocks[] = ucfirst($name) . ":\n" . $value;
+            }
+        }
+        return implode("\n\n", $blocks);
+    }
 }

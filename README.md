@@ -348,45 +348,88 @@ $prompt = Prompt::create()
 `getContext()` returns only the sections that have items, always in the order listed
 above. An unknown section name throws `Jambura\LLM\LLMException`.
 
-**An adapter** extends `Jambura\LLM` and implements `serialize()`, which turns a prompt
-into the request body the model's API expects, and `send()`, which makes the call and
-returns the reply text:
+**An adapter** extends `Jambura\LLM` and implements `send()`. The framework formats the
+prompt before `send()` runs, and two optional properties control how:
 
 ```php
 <?php
 namespace AIModel;
 
 use Jambura\LLM;
+use Jambura\LLM\Format;
 use Jambura\LLM\Prompt;
 
 class Example extends LLM
 {
     protected string $model = 'example-large';
 
-    public function serialize(Prompt $prompt): array
-    {
-        $document = array_filter([
-            'context'      => $prompt->getContext(),
-            'instructions' => $prompt->getInstructions(),
-        ]);
-        $document['task'] = $prompt->getTask();   // last: the end of a prompt carries the most weight
+    // Format::Xml (the default), Format::Json or Format::Text.
+    protected Format $format = Format::Json;
 
-        return [
-            'model'    => $this->model,
-            'messages' => [
-                ['role' => 'system', 'content' => (string) $prompt->getRole()],
-                ['role' => 'user', 'content' => json_encode($document)],
-            ],
-        ];
-    }
+    // Sections rendered before the task, in this order. The default is
+    // ['role', 'context', 'instructions']. This API takes the role separately.
+    protected array $order = ['context', 'instructions'];
 
-    protected function send(array $payload): string
+    protected function send(string $formattedPrompt, Prompt $prompt): string
     {
-        // Call the model's API with your HTTP client or the provider's SDK, and return
-        // the reply text. Throw Jambura\LLM\LLMException when the call fails.
+        // Put $formattedPrompt, and $prompt->getRole() since role isn't in $order, into
+        // the request the model's API expects. Make the call with your HTTP client or the
+        // provider's SDK, and return the reply text. Throw Jambura\LLM\LLMException when
+        // the call fails.
     }
 }
 ```
+
+The same prompt in each format, with the default order:
+
+```xml
+<role>Analyst</role>
+<context>
+  <retrieved>
+    <item>ETA 14:00</item>
+  </retrieved>
+</context>
+<instructions>
+  <instruction>Be brief.</instruction>
+</instructions>
+<task>Summarize.</task>
+```
+
+```json
+{
+    "role": "Analyst",
+    "context": {
+        "retrieved": ["ETA 14:00"]
+    },
+    "instructions": ["Be brief."],
+    "task": "Summarize."
+}
+```
+
+```
+Role:
+Analyst
+
+Context (retrieved):
+- ETA 14:00
+
+Instructions:
+- Be brief.
+
+Task:
+Summarize.
+```
+
+- **The task is always rendered last**, whatever `$order` says. `$order` can reorder
+  `role`, `context` and `instructions`, or leave any of them out. Listing `task`, an
+  unknown name or the same section twice throws `LLMException` when the class is
+  registered.
+- Empty sections are left out in every format, and the prompt's `type` is never rendered.
+- XML and JSON escape the prompt's text, so a context item can't close a tag or end a
+  string early. Text can't escape anything: an item containing `Task:` reads like a
+  heading. Use Text only for content you trust.
+- For a format the list doesn't cover, override `handlePrompt(Prompt $prompt): string`.
+  Whatever it returns is passed to `send()`.
 
 **Register adapters once**, at bootstrap, then use them anywhere:
 
@@ -399,17 +442,15 @@ $reply = LLM::use(AIModel\Example::class)->prompt($prompt);
 ```
 
 - `registerModels()` checks each class straight away. A class that doesn't exist, doesn't
-  extend `Jambura\LLM`, or is abstract throws `LLMException` at bootstrap, not on the
-  first prompt.
+  extend `Jambura\LLM`, is abstract, or has an invalid `$order` throws `LLMException` at
+  bootstrap, not on the first prompt.
 - `use()` builds an adapter the first time and returns that same instance after. Using a
   class that was never registered throws. `forgetModels()` empties the registry.
-- `prompt()` only accepts a `Prompt`, throws if it has no task, and returns
-  `send(serialize($prompt))`.
+- `prompt()` only accepts a `Prompt`, throws if it has no task, and returns the reply from
+  `send()`.
 - `use()` builds adapters through a final, protected constructor, so `new` can't be used.
   Give an adapter its defaults as property values and its settings through setters.
   `setModel()` and `getModel()` are already there for the model id.
-- Keep `serialize()` free of network calls, so a test can assert the exact request an
-  adapter builds.
 
 ## Migrations
 

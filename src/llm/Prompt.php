@@ -4,9 +4,9 @@ namespace Jambura\LLM;
 /**
  * A model-agnostic prompt.
  *
- * Holds each part of a prompt separately so that every model adapter can
- * serialize it in the format its API expects. Carries no knowledge of any
- * particular model.
+ * Holds each part of a prompt separately so that each model adapter can have
+ * it rendered in the order and format its model works best with. Carries no
+ * knowledge of any particular model.
  */
 class Prompt
 {
