@@ -4,13 +4,17 @@
     "license": "MIT",
     "autoload": {
         "psr-4": {
-            "Jambura\\Mvc\\": "src/mvc/"
+            "Jambura\\Mvc\\": "src/mvc/",
+            "Jambura\\LLM\\": "src/llm/"
         },
+        "classmap": [
+            "src/llm.php"
+        ],
         "files": [
             "src/helpers/jassets.php",
             "src/helpers/jcontroller.php",
-            "src/helpers/jcache.php", 
-            "src/helpers/jexceptions.php", 
+            "src/helpers/jcache.php",
+            "src/helpers/jexceptions.php",
             "src/helpers/jflash.php",
             "src/helpers/jmodel.php",
             "src/helpers/jrouter.php"
@@ -23,6 +27,15 @@
     ],
     "require": {
         "prepmock/idiorm": "v1.0.0",
-        "robmorgan/phinx": "0.11.6"
+        "robmorgan/phinx": "0.11.6",
+        "php": ">=7.1"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^7.5"
+    },
+    "config": {
+        "platform": {
+            "php": "7.1.33"
+        }
     }
 }
