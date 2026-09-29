@@ -31,6 +31,17 @@ class ReorderedModel extends XmlModel
     protected array $order = ['instructions', 'context'];
 }
 
+class SendSpyModel extends XmlModel
+{
+    public ?Prompt $received = null;
+
+    protected function send(string $formattedPrompt, Prompt $prompt): string
+    {
+        $this->received = $prompt;
+        return parent::send($formattedPrompt, $prompt);
+    }
+}
+
 class CustomFormatModel extends XmlModel
 {
     protected function handlePrompt(Prompt $prompt): string
@@ -50,6 +61,7 @@ class HandlePromptTest extends TestCase
             TextModel::class,
             ReorderedModel::class,
             CustomFormatModel::class,
+            SendSpyModel::class,
         ]);
     }
 
@@ -173,6 +185,59 @@ class HandlePromptTest extends TestCase
     public function testAnOverriddenHandlePromptIsWhatGetsSent(): void
     {
         $this->assertSame('custom: Say OK.', $this->render(CustomFormatModel::class, Prompt::create()->setTask('Say OK.')));
+    }
+
+    /**
+     * Documents and options are payload and settings, not text. They must leave
+     * the rendered prompt untouched — a base64 PDF rendered into a <context> item
+     * would be both nonsense and enormous.
+     */
+    public function testDocumentsAndOptionsAreCarriedButNeverRendered(): void
+    {
+        $carrying = $this->fullPrompt()
+            ->addDocument('/tmp/receipt.pdf', 'application/pdf')
+            ->setOption('max_tokens', 8192)
+            ->setOption('temperature', 0.0);
+
+        $this->assertSame(
+            $this->render(XmlModel::class, $this->fullPrompt()),
+            $this->render(XmlModel::class, $carrying)
+        );
+    }
+
+    public function testEveryFormatIgnoresDocumentsAndOptions(): void
+    {
+        foreach ([XmlModel::class, JsonModel::class, TextModel::class] as $class) {
+            $carrying = $this->fullPrompt()
+                ->addDocument('/tmp/receipt.pdf')
+                ->setOption('max_tokens', 8192);
+
+            $this->assertSame(
+                $this->render($class, $this->fullPrompt()),
+                $this->render($class, $carrying),
+                $class . ' rendered a document or an option'
+            );
+        }
+    }
+
+    /**
+     * The adapter still has to be able to reach them, which is the whole reason
+     * they live on the prompt and not on the one shared adapter instance.
+     */
+    public function testSendIsHandedThePromptCarryingThem(): void
+    {
+        $prompt = $this->fullPrompt()
+            ->addDocument('/tmp/receipt.pdf', 'application/pdf')
+            ->setOption('max_tokens', 8192);
+
+        $model = LLM::use(SendSpyModel::class);
+        $model->prompt($prompt);
+
+        $this->assertSame(
+            [['path' => '/tmp/receipt.pdf', 'media_type' => 'application/pdf']],
+            $model->received->getDocuments()
+        );
+        $this->assertSame(8192, $model->received->getOption('max_tokens'));
     }
 
     private function render(string $class, Prompt $prompt): string
