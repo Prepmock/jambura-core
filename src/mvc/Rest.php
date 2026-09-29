@@ -45,18 +45,6 @@ abstract class Rest extends Controller
     ];
 
     /**
-     * List of PUT data sent from client, parsed into array
-     * @var array
-     */
-    private $putVars = [];
-
-    /**
-     * List of DELETE data sent from client, parsed into array
-     * @var array
-     */
-    private $deleteVars = [];
-
-    /**
      * Do the authentication for the REST call
      *
      * @return bool true if authentication successful false otherwise
@@ -103,6 +91,26 @@ abstract class Rest extends Controller
     }
 
     /**
+     * Answers a request the validator refused, and stops handling it.
+     *
+     * Called by Request::fail() when a RequestValidator link fails, so a REST
+     * controller reports it the same way sendError() does: the status, an
+     * 'error' message, and 'fields' when a schema found per-field problems.
+     * Never returns.
+     *
+     * @param int    $status  the HTTP status, such as 405, 403 or 422
+     * @param string $message what was wrong
+     * @param array  $fields  field name => messages
+     */
+    public function sendValidationError($status, $message, array $fields = [])
+    {
+        if ($fields) {
+            $this->response['fields'] = $fields;
+        }
+        $this->sendError($status, $message);
+    }
+
+    /**
      * Overrides parents render.
      *
      * Overrides parent::render() so that end() can not get executed
@@ -138,19 +146,12 @@ abstract class Rest extends Controller
     /**
      * Parse request payload (from client)
      *
-     * Parse request payload if request method is PUT or DELETE
-     * and store them in an associative array.
+     * Nothing to parse here any more: Request reads the body for every method,
+     * form-encoded or JSON, and put() and delete() read it from there. Kept so a
+     * controller that overrides it still works.
      */
     protected function setRequestPayload()
     {
-        switch ($this->method) {
-            case 'PUT':
-                parse_str(file_get_contents('php://input'), $this->putData);
-                break;
-            case 'DELETE':
-                parse_str(file_get_contents('php://input'), $this->deleteData);
-                break;
-        }
     }
 
     /**
@@ -164,10 +165,7 @@ abstract class Rest extends Controller
      */
     protected function put($key)
     {
-        if (isset($this->putData[$key])) {
-            return $this->putData[$key];
-        }
-        return false;
+        return $this->request()->input($key, false);
     }
 
     /**
@@ -181,10 +179,7 @@ abstract class Rest extends Controller
      */
     protected function delete($key)
     {
-        if (isset($this->deleteData[$key])) {
-            return $this->deleteData[$key];
-        }
-        return false;
+        return $this->request()->input($key, false);
     }
 
     /**

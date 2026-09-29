@@ -13,6 +13,12 @@ class Controller
     private $postVars = array();
     private $requests = array();
 
+    /**
+     * The request being answered, built the first time request() is called.
+     * @var Request|null
+     */
+    private $request = null;
+
     private $headers = null;
 
     public function __construct($api = false)
@@ -122,8 +128,32 @@ class Controller
         return $this->postVars[$var];
     }
 
-    protected function request($var)
+    /**
+     * The request being answered, or one value out of $_REQUEST.
+     *
+     * Called with no argument it returns the Jambura\Mvc\Request for this
+     * request, which reports the method, headers, body and the rest, and starts
+     * a validator with validate():
+     *
+     *     $this->request()->method();
+     *     $this->request()->validate()->method('post')->schema([...]);
+     *
+     * Called with a name it stays the old shortcut for $_REQUEST[$name],
+     * returning false when it is not there. New code should prefer
+     * $this->request()->input($name), which also reads a JSON body.
+     *
+     * @param string|null $var the value to read, or null for the Request
+     * @return Request|mixed
+     */
+    protected function request($var = null)
     {
+        if ($var === null) {
+            if ($this->request === null) {
+                $this->request = Request::fromGlobals($this);
+            }
+            return $this->request;
+        }
+
         if (!isset($this->requests[$var])) {
             if (!isset($_REQUEST[$var])) {
                 return false;
