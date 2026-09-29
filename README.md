@@ -233,6 +233,191 @@ class Controller_booksapi extends Jambura\Mvc\Rest
 - The request body is read with `parse_str()`, so only form encoding is understood. For
   JSON, decode `file_get_contents('php://input')` yourself.
 
+## Requests and validation
+
+`$this->request()` gives a controller one read-only `Jambura\Mvc\Request` describing the
+call it is answering:
+
+```php
+$r = $this->request();
+
+$r->method();                   // 'POST'
+$r->isMethod('post', 'put');    // any of them, whatever the casing
+$r->mime();                     // 'application/json' - the body's media type
+$r->isJson();
+$r->accepts();                  // ['application/json', '*/*']
+$r->header('Authorization');    // one header, any casing
+$r->bearerToken();              // the token out of it
+$r->path();                     // 'books/show'
+$r->query('page', 1);           // query string, with a default
+$r->input('isbn');              // the body: form-encoded or JSON, whichever arrived
+$r->all();                      // query + body, the body winning a clash
+$r->only(['title', 'isbn']);
+$r->has('shelf');
+$r->files();
+$r->ip();
+$r->roles();                    // from the resolver you wire at bootstrap
+```
+
+The body is read for every method, so `Rest::put()` and `Rest::delete()` now return values
+instead of `false`, and a JSON body needs no decoding of your own.
+`$this->request('id')` still works as the old shortcut for `$_REQUEST['id']`.
+
+### Validating a request
+
+`validate()` starts a validator with four links: the HTTP method, the caller's roles, the
+shape of the payload, and anything else you write. Each is checked as you call it, and the
+first failure ends the request:
+
+```php
+public function action_create()
+{
+    $book = $this->request()->validate()
+        ->method('post')
+        ->roles(['librarian', 'admin'])
+        ->schema([
+            'title'  => 'required',
+            'isbn'   => ['required', ['regex', '/^[0-9-]{10,17}$/', 'That ISBN does not look right']],
+            'copies' => ['required', 'int', ['min', 1]],
+            'shelf'  => ['in', ['fiction', 'reference']],
+        ])
+        ->check([$this, 'withinQuota'])
+        ->validated();          // only the fields the schema named
+
+    $this->respCode = 201;
+    $this->response['id'] = Jambura\Mvc\Model::factory('books')->add($book);
+}
+```
+
+Write the links in the order you want them checked. Method, roles, schema, checks is the
+house order: cheapest first, and a caller without permission never learns whether their
+payload was valid.
+
+### Reusable specs
+
+A validator built with `new` has no request, so it only records its links. That makes it a
+reusable description of what a request must look like:
+
+```php
+use Jambura\Mvc\RequestValidator;
+
+class BookRequests
+{
+    public static function create()
+    {
+        return (new RequestValidator())
+            ->method('post')
+            ->roles(['librarian', 'admin'])
+            ->schema(['title' => 'required', 'isbn' => 'required']);
+    }
+}
+```
+
+Hand it to `validate()`, and carry on chaining after it:
+
+```php
+$book = $this->request()
+    ->validate(ApiDefaults::jsonOnly(), BookRequests::create())   // run in the order given
+    ->schema(['copies' => ['required', 'int', ['min', 1]]])       // merges with their schema
+    ->check([$this, 'withinQuota'])
+    ->validated();
+```
+
+Running a spec copies its links and leaves the spec alone, so one spec serves every request.
+`schema()` merges and `check()` appends; `method()` and `roles()` replace, since there is
+only one answer to each.
+
+Keep spec builders cheap: literals only. Anything needing a query belongs in a `function`
+rule or a `check`, so it runs only when the link is reached.
+
+```php
+->schema(['shelf' => ['in', Shelf::allNames()]])       // queries on every request, even refused ones
+->schema(['shelf' => ['function', 'shelfExists']])     // runs only if the schema is reached
+```
+
+### Schema rules
+
+The rules are `Jambura\Mvc\Validator`'s, which are `Model::validation()`'s, so a rule reads
+the same in a model and in a controller. Fields are read from the query string and the body
+together.
+
+| Rule | Passes when |
+|---|---|
+| `required` | the field arrived with something in it; an empty string counts as absent |
+| `int`, `number`, `bool`, `email` | the value is one of those |
+| `['regex', $pattern, $message]` | the pattern matches; the message is optional |
+| `['in', ['a', 'b']]` | the value is one of the listed ones |
+| `['min', 1]`, `['max', 10]`, `['between', 13, 120]` | the number is in range |
+| `['length', 2, 60]` | the string's length is in range; the maximum is optional |
+| `['function', 'shelfExists']` | your method returns true; return a string to use it as the message |
+
+A `function` rule calls the controller, and may be protected, as a model's validation
+callbacks are. It is given the value and every value being checked. Every field is checked,
+not just the first to fail.
+
+`Validator` works on its own too, wherever you have an array to check:
+
+```php
+$validator = Jambura\Mvc\Validator::make($payload, ['email' => ['required', 'email']]);
+if ($validator->fails()) {
+    print_r($validator->errors());   // ['email' => ['email is required']]
+}
+```
+
+### Checks of your own
+
+A check is a controller method, a closure, or a class implementing
+`Jambura\Mvc\RequestCheck`. It gets the `Request`, and returns `true` to pass, `false` for a
+plain 422, a string for a 422 with that message, or an array to choose the status:
+
+```php
+protected function withinQuota(Jambura\Mvc\Request $request)
+{
+    return Quota::remaining($request->roles()) > 0
+        ? true
+        : ['status' => 429, 'error' => 'Monthly quota used up'];
+}
+
+->check([$this, 'withinQuota'])                  // protected is fine
+->check(new DuringOpeningHours())                 // implements RequestCheck
+->check(fn (Request $r) => $r->input('to') !== $r->input('from') ?: 'Shelves must differ')
+```
+
+### Roles
+
+The framework does not know what a user is, so the application says once, at bootstrap:
+
+```php
+// index.php
+Jambura\Mvc\RequestValidator::resolveRolesUsing(function () {
+    return isset($_SESSION['user']) ? $_SESSION['user']['roles'] : null;   // null = nobody signed in
+});
+```
+
+`roles()` is authorization; `Rest::authenticate()` stays authentication. A caller with no
+session gets 401, and a signed-in caller without a listed role gets 403.
+
+### What a caller sees
+
+| Status | When |
+|---|---|
+| 405 | the method is not allowed, with an `Allow` header naming the ones that are |
+| 401 | the roles resolver reported nobody signed in |
+| 403 | signed in, but holding none of the listed roles |
+| 400 | a JSON body that would not decode |
+| 422 | a schema failed, with `fields` naming the messages per field |
+| yours | whatever status your own check asked for |
+
+A `Rest` controller sends the status and stops, the way `sendError()` does:
+
+```json
+{"error": "Validation failed", "fields": {"isbn": ["That ISBN does not look right"]}}
+```
+
+A plain controller has no JSON to send, so the failure throws `jamexRequestInvalid`, whose
+`status()` and `fields()` your error page can render. So does a `Request` built by hand,
+which is what makes the whole thing testable without a web server.
+
 ## Models
 
 A model wraps one table. It is named `Model_{name}`, lives where your autoloader finds
@@ -317,6 +502,7 @@ Jambura\Mvc\Model::factory('books')->add([
 | `jCache` | `$this->cache`: a JSON file cache in `/tmp/`, with `store($key, $data, $seconds)`, `get`, `isAvailable`, `erase` and `eraseExpired` |
 | `jRouter`, `jController`, `jModel` | global aliases for `Jambura\Mvc\Router`, `Controller` and `Model` |
 | `jamex`, `jamexPageNotFound`, `jamexBadController`, `jamexBadAction` | the router's exceptions |
+| `jamexRequestInvalid` | a request a validator refused, outside a REST controller: `status()` and `fields()` say why |
 | `jStack`, `jQueue` | wrappers returned by `findAll('stack' / 'queue')`. **Not autoloaded:** require `src/data-structure/jdatastructures.php` and the class file before using them |
 
 `Router::showErrorPage($page, $exception)` logs through a `\Logger` class your
@@ -481,8 +667,6 @@ signed foreign key points at an unsigned id. Turn both off in `phinx.php`:
 
 ## Known issues
 
-- `Rest::put()` and `Rest::delete()` always return `false`. `setRequestPayload()` parses
-  the body into properties that were never declared, so the values are lost.
 - `Router::route()` does not validate the controller name before including it. Sanitize
   `$_GET['controller']` first, as the bootstrap example does.
 
