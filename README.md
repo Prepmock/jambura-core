@@ -452,6 +452,91 @@ $reply = LLM::use(AIModel\Example::class)->prompt($prompt);
   Give an adapter its defaults as property values and its settings through setters.
   `setModel()` and `getModel()` are already there for the model id.
 
+## LLM pipelines
+
+`Jambura\LLM\Pipeline` puts a job's steps in order and runs them over one shared
+`Jambura\LLM\Context`. Define a pipeline where the application boots, then run it from a
+controller, a command or a queue job.
+
+```php
+use Jambura\LLM\Pipeline;
+
+Pipeline::make('mates_receipt')
+    ->configure(['currency' => 'CAD'])
+    ->gatekeeper(AttachmentGuard::class, 'check_attachment')
+    ->preprocessor(FileStorage::class, 'save_attachments')
+    ->model(ReceiptReader::class, 'read_receipt')
+    ->route('default', ['check_attachment', 'save_attachments', 'read_receipt']);
+```
+
+```php
+$context = Pipeline::use('mates_receipt')->followRoute('default')->feed([
+    'attachments' => $request->files('attachments'),
+    'user_id'     => $userId,
+]);
+
+$context->get('response');   // what the model step produced
+$context->ranSteps();        // ['check_attachment', 'save_attachments', 'read_receipt']
+$context->wasStopped();      // true when a gatekeeper ended the run early
+```
+
+**The verbs.** Each registers one step and decides what the pipeline does with what that
+step returns:
+
+| Verb | What the step is for | What its return value does |
+|---|---|---|
+| `gatekeeper()` | deciding whether the rest should run at all | `false` stops the run; an array adds values |
+| `preprocessor()` | gathering or reshaping what the model needs | an array adds values to the context |
+| `model()` | calling a model through an adapter | a string is stored as `response`; an array adds values |
+| `step()` | anything else, such as storing the result | an array adds values |
+
+All four take the same targets: a class name, an object, or a callable. A class name is
+built once per pipeline, so such a class needs a constructor that takes no arguments; pass
+a ready-made object when the step has dependencies. Every step is called with the run's
+`Context` as its only argument.
+
+**Aliases.** A step is registered under an alias, which defaults to the method name, and
+routes refer to steps by alias. `as:` renames one, and a callable needs it:
+
+```php
+->preprocessor(FileStorage::class, 'save_attachments', as: 'store_files')
+->step(fn (Context $context) => ['queued' => true], as: 'flag_for_human')
+```
+
+**Routes.** `route()` names an order, and a pipeline can hold several over the same steps,
+for example a `default` route and a `retry` route that skips the expensive parts.
+`followRoute()` picks one and the choice sticks to the pipeline; `feed()` falls back to
+`default` when nothing was chosen. Steps and routes can be declared in any order, and
+every alias in a route is checked before the first step runs, so a typo does no work.
+
+**A model step** builds a `Prompt` and sends it through an adapter:
+
+```php
+class ReceiptReader
+{
+    public function read_receipt(Context $context): string
+    {
+        $prompt = Prompt::create()
+            ->setType('receipt')
+            ->addContext('dynamic', $context->get('input'))
+            ->addContext('static', 'Amounts are in ' . $context->setting('currency'))
+            ->setTask('Extract the total and the vendor.');
+
+        return LLM::use(AIModel\Claude::class)->prompt($prompt);
+    }
+}
+```
+
+**The context.** `get()`, `set()`, `merge()`, `has()` and `all()` carry the run's values;
+`setting()` reads what `configure()` was given. `ranSteps()`, `wasStopped()` and
+`stoppedAt()` say what happened, which is what you log or assert on.
+
+**Errors.** Everything throws `Jambura\LLM\LLMException`, and every case is a mistake in
+the definition or the call: an unknown pipeline or route, a name defined twice, a route
+naming a step that was never registered, or a step method that doesn't exist. A gatekeeper
+stopping a run is not one of them: `feed()` returns the context with `wasStopped()` true,
+so the caller decides what that means.
+
 ## Migrations
 
 `robmorgan/phinx` is installed with the framework, so `vendor/bin/phinx` is available
