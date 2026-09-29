@@ -46,6 +46,32 @@ class Prompt
      */
     private $task = null;
 
+    /**
+     * Files the model should read, each ['path' => string, 'media_type' => string|null].
+     *
+     * Not text, so handlePrompt() never renders these — an adapter reads them in
+     * send() and puts them wherever its API takes a document or an image.
+     *
+     * They ride on the prompt rather than on the adapter because use() hands out
+     * one shared instance per model: per-call state left on an adapter would
+     * reach whoever prompts it next.
+     *
+     * @var array
+     */
+    private $documents = [];
+
+    /**
+     * Per-call generation settings for the adapter to pass on, such as a token
+     * ceiling or a sampling temperature. Named rather than typed, because each
+     * provider spells them differently — an adapter reads the ones it knows and
+     * ignores the rest.
+     *
+     * Carried, never rendered, same as documents.
+     *
+     * @var array
+     */
+    private $options = [];
+
     public function __construct()
     {
         $this->context = array_fill_keys(self::CONTEXT_SECTIONS, []);
@@ -126,6 +152,52 @@ class Prompt
     }
 
     /**
+     * Adds a file for the model to read.
+     *
+     * The path is kept as given and nothing is opened here — a prompt should be
+     * constructable and assertable without touching a filesystem. The adapter
+     * reads the file in send() and fails there if it cannot.
+     *
+     * Leave $mediaType out when the adapter can infer it; pass it when the file's
+     * extension would mislead, or when the API insists on being told.
+     *
+     * @param string      $path
+     * @param string|null $mediaType
+     * @return $this
+     *
+     * @throws LLMException if the path is not a non-empty string
+     */
+    public function addDocument($path, $mediaType = null)
+    {
+        if (!is_string($path) || trim($path) === '') {
+            throw new LLMException('A document needs a path');
+        }
+        $this->documents[] = ['path' => $path, 'media_type' => $mediaType];
+        return $this;
+    }
+
+    /**
+     * Sets a generation setting for the adapter to pass to its API.
+     *
+     * Setting the same name again replaces it, so a caller can override a default
+     * without having to know whether one was set.
+     *
+     * @param string $name
+     * @param mixed  $value
+     * @return $this
+     *
+     * @throws LLMException if the name is not a non-empty string
+     */
+    public function setOption($name, $value)
+    {
+        if (!is_string($name) || trim($name) === '') {
+            throw new LLMException('An option needs a name');
+        }
+        $this->options[$name] = $value;
+        return $this;
+    }
+
+    /**
      * @return string|null
      */
     public function getType()
@@ -165,5 +237,35 @@ class Prompt
     public function getTask()
     {
         return $this->task;
+    }
+
+    /**
+     * Files for the model to read, in the order they were added.
+     *
+     * @return array each ['path' => string, 'media_type' => string|null]
+     */
+    public function getDocuments()
+    {
+        return $this->documents;
+    }
+
+    /**
+     * One generation setting, or $default when it was never set.
+     *
+     * @param string $name
+     * @param mixed  $default
+     * @return mixed
+     */
+    public function getOption($name, $default = null)
+    {
+        return array_key_exists($name, $this->options) ? $this->options[$name] : $default;
+    }
+
+    /**
+     * @return array setting name => value
+     */
+    public function getOptions()
+    {
+        return $this->options;
     }
 }
