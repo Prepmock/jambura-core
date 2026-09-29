@@ -1,62 +1,49 @@
 <?php
 
 use Jambura\LLM\Context;
+use Jambura\LLM\Gatekeeper;
 use Jambura\LLM\LLMException;
 use Jambura\LLM\Pipeline;
+use Jambura\LLM\Preprocessor;
 use Jambura\LLM\Prompt;
+use Jambura\LLM\Step;
 use PHPUnit\Framework\TestCase;
 
-class AttachmentGate
+class AttachmentGate implements Gatekeeper
 {
-    public function check_attachment(Context $context)
+    public function allows(Context $context): bool|array
     {
-        return $context->get('attachments') ? ['attachment_count' => count($context->get('attachments'))] : false;
+        $attachments = $context->get('attachments', []);
+        return $attachments ? ['attachment_count' => count($attachments)] : false;
     }
 }
 
-class FileStore
+class FileStore implements Preprocessor
 {
-    public function save_attachments(Context $context)
+    public function process(Context $context): array
     {
         return ['saved' => count($context->get('attachments', [])), 'currency' => $context->setting('currency')];
     }
 }
 
-class VendorLookup
+class VendorLookup implements Preprocessor
 {
-    public function attach_vendor(Context $context)
+    public function process(Context $context): array
     {
         $context->prompt()->addContext('retrieved', 'Vendor: Acme');
         return ['vendor' => 'Acme'];
     }
 }
 
-class ReceiptReader
+class ResponseFiler implements Step
 {
-    public function read_receipt(Context $context)
+    public function handle(Context $context): mixed
     {
-        return 'read ' . $context->get('saved', 0) . ' file(s)';
+        return ['filed' => strlen((string) $context->get('response'))];
     }
 }
 
-class PromptReader
-{
-    public function read_receipt(Context $context)
-    {
-        $prompt = $context->prompt();
-        return $prompt->getTask() . ' | context: ' . json_encode($prompt->getContext());
-    }
-}
-
-class ParsingReader
-{
-    public function read_receipt(Context $context)
-    {
-        return ['response' => 'parsed', 'tokens' => 12];
-    }
-}
-
-class CountedStep
+class CountedStep implements Step
 {
     public static int $built = 0;
 
@@ -65,26 +52,38 @@ class CountedStep
         self::$built++;
     }
 
-    public function touch(Context $context)
+    public function handle(Context $context): mixed
     {
         return ['built' => self::$built];
     }
 }
 
-class StatefulStep
+class StatefulStep implements Step
 {
     public function __construct(private string $tag)
     {
     }
 
-    public function stamp(Context $context)
+    public function handle(Context $context): mixed
     {
         return ['tag' => $this->tag];
     }
 }
 
-class NoSuchMethodStep
+class NotAStep
 {
+}
+
+/**
+ * An adapter that hands back the prompt it was given, so a test can see exactly
+ * what the pipeline sent.
+ */
+class EchoModel extends \Jambura\LLM
+{
+    protected function send(string $formattedPrompt, Prompt $prompt): string
+    {
+        return $formattedPrompt;
+    }
 }
 
 class PipelineTest extends TestCase
@@ -92,6 +91,7 @@ class PipelineTest extends TestCase
     protected function setUp(): void
     {
         Pipeline::forgetPipelines();
+        \Jambura\LLM::forgetModels();
         CountedStep::$built = 0;
     }
 
@@ -130,13 +130,14 @@ class PipelineTest extends TestCase
             ->feed($this->prompt(), ['attachments' => ['a.pdf', 'b.pdf']]);
 
         $this->assertSame(
-            ['check_attachment', 'save_attachments', 'read_receipt'],
+            ['check_attachment', 'save_attachments', 'read_receipt', 'file_response'],
             $context->ranSteps()
         );
         $this->assertSame(2, $context->get('attachment_count'));
         $this->assertSame(2, $context->get('saved'));
         $this->assertSame('CAD', $context->get('currency'));
-        $this->assertSame('read 2 file(s)', $context->get('response'));
+        $this->assertSame('<task>Extract the total.</task>', $context->get('response'));
+        $this->assertSame(strlen('<task>Extract the total.</task>'), $context->get('filed'));
         $this->assertFalse($context->wasStopped());
     }
 
@@ -155,7 +156,7 @@ class PipelineTest extends TestCase
     public function testFeedCopiesThePromptSoTheCallersPromptIsUnchanged(): void
     {
         Pipeline::make('receipts')
-            ->preprocessor(VendorLookup::class, 'attach_vendor')
+            ->preprocessor('attach_vendor', VendorLookup::class)
             ->route('default', ['attach_vendor']);
         $prompt = $this->prompt();
 
@@ -166,46 +167,87 @@ class PipelineTest extends TestCase
         $this->assertNotSame($prompt, $context->prompt());
     }
 
-    public function testWhatAPreprocessorAddsToThePromptReachesTheModelStep(): void
+    public function testWhatAPreprocessorAddsToThePromptIsWhatTheAdapterSends(): void
     {
         Pipeline::make('receipts')
-            ->preprocessor(VendorLookup::class, 'attach_vendor')
-            ->model(PromptReader::class, 'read_receipt')
+            ->preprocessor('attach_vendor', VendorLookup::class)
+            ->model('read_receipt', EchoModel::class)
             ->route('default', ['attach_vendor', 'read_receipt']);
 
         $context = Pipeline::use('receipts')->feed($this->prompt());
 
         $this->assertSame(
-            'Extract the total. | context: {"retrieved":["Vendor: Acme"]}',
+            "<context>\n  <retrieved>\n    <item>Vendor: Acme</item>\n  </retrieved>\n</context>\n"
+            . '<task>Extract the total.</task>',
             $context->get('response')
         );
+    }
+
+    public function testAModelStepRegistersItsAdapterWithTheLlmRegistry(): void
+    {
+        Pipeline::make('receipts')->model('read_receipt', EchoModel::class);
+
+        $this->assertInstanceOf(EchoModel::class, \Jambura\LLM::use(EchoModel::class));
+    }
+
+    public function testAModelStepNeedsAnAdapterClass(): void
+    {
+        $pipeline = Pipeline::make('receipts');
+
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage('must be an adapter extending Jambura\LLM');
+        $pipeline->model('read_receipt', FileStore::class);
+    }
+
+    public function testAModelStepNamingAMissingClassThrows(): void
+    {
+        $pipeline = Pipeline::make('receipts');
+
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage('names the adapter class AIModel\Nope, which does not exist');
+        $pipeline->model('read_receipt', 'AIModel\Nope');
+    }
+
+    public function testAStepClassMustImplementItsVerbsInterface(): void
+    {
+        $pipeline = Pipeline::make('receipts');
+
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage('must implement Jambura\LLM\Gatekeeper (allows(Context))');
+        $pipeline->gatekeeper('check_attachment', NotAStep::class);
+    }
+
+    public function testAStepRegisteredUnderTheWrongVerbThrows(): void
+    {
+        $pipeline = Pipeline::make('receipts');
+
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage('is registered as a gatekeeper, so FileStore must implement');
+        $pipeline->gatekeeper('save_attachments', FileStore::class);
+    }
+
+    public function testAnUnknownStepKindThrows(): void
+    {
+        $pipeline = Pipeline::make('receipts');
+
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage("Unknown step kind 'critic'");
+        $pipeline->step('review', fn (Context $context) => null, 'critic');
     }
 
     public function testAStepCanReplaceThePromptForLaterSteps(): void
     {
         Pipeline::make('receipts')
-            ->preprocessor(function (Context $context) {
+            ->preprocessor('trim', function (Context $context) {
                 $context->setPrompt(Prompt::create()->setTask('Trimmed task'));
                 return [];
-            }, as: 'trim')
-            ->model(PromptReader::class, 'read_receipt')
+            })
+            ->model('read_receipt', EchoModel::class)
             ->route('default', ['trim', 'read_receipt']);
 
         $context = Pipeline::use('receipts')->feed($this->prompt());
 
-        $this->assertStringStartsWith('Trimmed task', $context->get('response'));
-    }
-
-    public function testAModelReturningAnArrayMergesInsteadOfWritingResponse(): void
-    {
-        Pipeline::make('receipts')
-            ->model(ParsingReader::class, 'read_receipt')
-            ->route('default', ['read_receipt']);
-
-        $context = Pipeline::use('receipts')->feed($this->prompt());
-
-        $this->assertSame('parsed', $context->get('response'));
-        $this->assertSame(12, $context->get('tokens'));
+        $this->assertSame('<task>Trimmed task</task>', $context->get('response'));
     }
 
     public function testConfigureMergesAndReachesTheSteps(): void
@@ -213,7 +255,7 @@ class PipelineTest extends TestCase
         $pipeline = Pipeline::make('receipts')
             ->configure(['currency' => 'USD', 'token_budget' => 8000])
             ->configure(['currency' => 'CAD'])
-            ->preprocessor(FileStore::class, 'save_attachments')
+            ->preprocessor('save_attachments', FileStore::class)
             ->route('default', ['save_attachments']);
 
         $this->assertSame(['currency' => 'CAD', 'token_budget' => 8000], $pipeline->settings());
@@ -223,15 +265,18 @@ class PipelineTest extends TestCase
     public function testFeedFallsBackToTheDefaultRoute(): void
     {
         Pipeline::make('receipts')
-            ->model(ReceiptReader::class, 'read_receipt')
+            ->model('read_receipt', EchoModel::class)
             ->route('default', ['read_receipt']);
 
-        $this->assertSame('read 0 file(s)', Pipeline::use('receipts')->feed($this->prompt())->get('response'));
+        $this->assertSame(
+            '<task>Extract the total.</task>',
+            Pipeline::use('receipts')->feed($this->prompt())->get('response')
+        );
     }
 
     public function testFeedWithoutAnyRouteToFollowThrows(): void
     {
-        Pipeline::make('receipts')->model(ReceiptReader::class, 'read_receipt');
+        Pipeline::make('receipts')->model('read_receipt', EchoModel::class);
 
         $this->expectException(LLMException::class);
         $this->expectExceptionMessage("Pipeline 'receipts' has no route to follow");
@@ -241,8 +286,8 @@ class PipelineTest extends TestCase
     public function testTheChosenRouteSticksForLaterRuns(): void
     {
         Pipeline::make('receipts')
-            ->model(ReceiptReader::class, 'read_receipt')
-            ->step(fn (Context $context) => ['skipped' => true], as: 'quick')
+            ->model('read_receipt', EchoModel::class)
+            ->step('quick', fn (Context $context) => ['skipped' => true])
             ->route('default', ['read_receipt'])
             ->route('quick', ['quick']);
 
@@ -255,7 +300,7 @@ class PipelineTest extends TestCase
     public function testFollowingAnUnknownRouteThrowsAndNamesTheRoutesThereAre(): void
     {
         Pipeline::make('receipts')
-            ->model(ReceiptReader::class, 'read_receipt')
+            ->model('read_receipt', EchoModel::class)
             ->route('default', ['read_receipt']);
 
         $this->expectException(LLMException::class);
@@ -267,9 +312,10 @@ class PipelineTest extends TestCase
     {
         $ran = [];
         Pipeline::make('receipts')
-            ->step(function (Context $context) use (&$ran) {
+            ->step('first', function (Context $context) use (&$ran) {
                 $ran[] = 'first';
-            }, as: 'first')
+                return null;
+            })
             ->route('default', ['first', 'typo']);
 
         try {
@@ -281,56 +327,34 @@ class PipelineTest extends TestCase
         $this->assertSame([], $ran);
     }
 
-    public function testACallableStepNeedsAnAlias(): void
+    public function testTwoStepsCannotShareAName(): void
     {
-        $pipeline = Pipeline::make('receipts');
-
-        $this->expectException(LLMException::class);
-        $this->expectExceptionMessage('A callable step needs an alias');
-        $pipeline->step(fn (Context $context) => null);
-    }
-
-    public function testTwoStepsCannotShareAnAlias(): void
-    {
-        $pipeline = Pipeline::make('receipts')->preprocessor(FileStore::class, 'save_attachments');
+        $pipeline = Pipeline::make('receipts')->preprocessor('save_attachments', FileStore::class);
 
         $this->expectException(LLMException::class);
         $this->expectExceptionMessage("already has a step called 'save_attachments'");
-        $pipeline->preprocessor(FileStore::class, 'save_attachments');
+        $pipeline->preprocessor('save_attachments', FileStore::class);
     }
 
-    public function testAsRenamesTheStepForRoutes(): void
-    {
-        $pipeline = Pipeline::make('receipts')
-            ->preprocessor(FileStore::class, 'save_attachments', as: 'store_files')
-            ->route('default', ['store_files']);
-
-        $this->assertSame(['store_files' => Pipeline::PREPROCESSOR], $pipeline->definedSteps());
-        $this->assertSame(0, $pipeline->feed($this->prompt())->get('saved'));
-    }
-
-    public function testAStepNamingAMethodTheClassDoesNotHaveThrows(): void
-    {
-        $pipeline = Pipeline::make('receipts');
-
-        $this->expectException(LLMException::class);
-        $this->expectExceptionMessage('NoSuchMethodStep::run(), which does not exist');
-        $pipeline->model(NoSuchMethodStep::class, 'run');
-    }
-
-    public function testACallableStepIsGivenTheContext(): void
+    public function testClosuresCanStandInForAnyVerb(): void
     {
         Pipeline::make('receipts')
-            ->preprocessor(fn (Context $context) => ['task' => $context->prompt()->getTask()], as: 'look')
-            ->route('default', ['look']);
+            ->gatekeeper('positive_total', fn (Context $context) => $context->get('total') > 0)
+            ->preprocessor('look', fn (Context $context) => ['task' => $context->prompt()->getTask()])
+            ->route('default', ['positive_total', 'look']);
 
-        $this->assertSame('Extract the total.', Pipeline::use('receipts')->feed($this->prompt())->get('task'));
+        $allowed = Pipeline::use('receipts')->feed($this->prompt(), ['total' => 42]);
+        $this->assertSame('Extract the total.', $allowed->get('task'));
+        $this->assertFalse($allowed->wasStopped());
+
+        $stopped = Pipeline::use('receipts')->feed($this->prompt(), ['total' => 0]);
+        $this->assertSame('positive_total', $stopped->stoppedAt());
     }
 
     public function testAnObjectStepIsUsedAsGiven(): void
     {
         Pipeline::make('receipts')
-            ->preprocessor(new StatefulStep('receipts-v2'), 'stamp')
+            ->step('stamp', new StatefulStep('receipts-v2'))
             ->route('default', ['stamp']);
 
         $this->assertSame('receipts-v2', Pipeline::use('receipts')->feed($this->prompt())->get('tag'));
@@ -339,7 +363,7 @@ class PipelineTest extends TestCase
     public function testAStepClassIsBuiltOnceAcrossRuns(): void
     {
         Pipeline::make('receipts')
-            ->preprocessor(CountedStep::class, 'touch')
+            ->step('touch', CountedStep::class)
             ->route('default', ['touch']);
 
         Pipeline::use('receipts')->feed($this->prompt());
@@ -357,9 +381,10 @@ class PipelineTest extends TestCase
             'check_attachment' => Pipeline::GATEKEEPER,
             'save_attachments' => Pipeline::PREPROCESSOR,
             'read_receipt' => Pipeline::MODEL,
+            'file_response' => Pipeline::STEP,
         ], $pipeline->definedSteps());
         $this->assertSame(
-            ['default' => ['check_attachment', 'save_attachments', 'read_receipt']],
+            ['default' => ['check_attachment', 'save_attachments', 'read_receipt', 'file_response']],
             $pipeline->definedRoutes()
         );
     }
@@ -368,10 +393,11 @@ class PipelineTest extends TestCase
     {
         return Pipeline::make('receipts')
             ->configure(['currency' => 'CAD'])
-            ->gatekeeper(AttachmentGate::class, 'check_attachment')
-            ->preprocessor(FileStore::class, 'save_attachments')
-            ->model(ReceiptReader::class, 'read_receipt')
-            ->route('default', ['check_attachment', 'save_attachments', 'read_receipt']);
+            ->gatekeeper('check_attachment', AttachmentGate::class)
+            ->preprocessor('save_attachments', FileStore::class)
+            ->model('read_receipt', EchoModel::class)
+            ->step('file_response', ResponseFiler::class)
+            ->route('default', ['check_attachment', 'save_attachments', 'read_receipt', 'file_response']);
     }
 
     private function prompt(): Prompt

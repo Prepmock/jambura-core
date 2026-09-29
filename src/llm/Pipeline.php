@@ -4,16 +4,16 @@ namespace Jambura\LLM;
 /**
  * A named chain of steps that runs one prompt-shaped job.
  *
- * A pipeline is defined once, at bootstrap, and run as often as you like. The
- * definition registers each step under an alias, and routes put those aliases
- * in order. A run feeds input through one route and hands back the Context the
- * steps filled in:
+ * A pipeline is defined once, at bootstrap, and run as often as you like. Every
+ * step is registered under a name, and routes put those names in order. A run
+ * feeds a prompt through one route and hands back the Context the steps filled
+ * in:
  *
  *     Pipeline::make('mates_receipt')
  *         ->configure(['currency' => 'CAD'])
- *         ->gatekeeper(AttachmentGuard::class, 'check_attachment')
- *         ->preprocessor(FileStorage::class, 'save_attachments')
- *         ->model(ReceiptReader::class, 'read_receipt')
+ *         ->gatekeeper('check_attachment', AttachmentGuard::class)
+ *         ->preprocessor('save_attachments', FileStorage::class)
+ *         ->model('read_receipt', \AIModel\Claude::class)
  *         ->route('default', ['check_attachment', 'save_attachments', 'read_receipt']);
  *
  *     $prompt = Prompt::create()
@@ -26,20 +26,33 @@ namespace Jambura\LLM;
  *
  *     $context->get('response');
  *
- * The verb a step is registered with says what the pipeline does with what that
+ * Each verb registers a step of one kind, and the kind decides both the
+ * interface the step class implements and what the pipeline does with what the
  * step returns:
  *
- * - gatekeeper() - returning false stops the run there, and feed() returns the
- *   Context as it stood. Anything else carries on.
- * - preprocessor() - returning an array adds those values to the Context.
- * - model() - returning a string writes it to the Context as 'response'.
- * - step() - the primitive the three above wrap, with no extra meaning.
+ * | Verb           | Target                  | Its return value                    |
+ * |----------------|-------------------------|-------------------------------------|
+ * | gatekeeper()   | a Gatekeeper: allows()  | false stops the run                 |
+ * | preprocessor() | a Preprocessor: process() | an array adds values to the Context |
+ * | model()        | an LLM adapter class    | the reply is stored as 'response'   |
+ * | step()         | a Step: handle()        | an array adds values to the Context |
  *
- * Every verb takes the same targets: a class name, an object, or a callable. A
- * class name is built once per pipeline with `new`, so such a step class must be
- * constructible without arguments; pass a ready-made object when the step needs
- * dependencies. Whatever the target, a step is called with the run's Context as
- * its only argument.
+ * model() is the one verb that needs no class of your own. It takes one of the
+ * adapters the framework already has - a subclass of Jambura\LLM - and sends the
+ * run's prompt through it, which is the whole of what a model step does:
+ *
+ *     ->model('process_document', \AIModel\Claude::class)
+ *
+ * Every verb takes the step's name first, the way route() and make() do, because
+ * that name is the step's identity: it is what routes refer to. The method to
+ * call is never named here - it comes from the interface the step class
+ * implements - so a step class has one entry point and a definition reads as a
+ * list of named stages.
+ *
+ * A step can also be a closure, for glue too small to deserve a class. A closure
+ * takes the Context and follows the same return rules as its verb:
+ *
+ *     ->gatekeeper('positive_total', fn (Context $c) => $c->get('total') > 0)
  *
  * feed() takes a Prompt and nothing else, for the same reason LLM::prompt()
  * does: a run always carries the structured prompt, and no step has to guess
@@ -47,20 +60,30 @@ namespace Jambura\LLM;
  * uploads, ids, records - travels beside it as the run's values.
  *
  * Errors are `Jambura\LLM\LLMException`, and every one of them is a mistake in
- * the definition or the call: an unknown pipeline or route, a duplicate alias, a
- * route naming a step that was never registered, or a step class without the
- * method named.
+ * the definition or the call: an unknown pipeline or route, a name used twice, a
+ * step class that does not implement its verb's interface, or a route naming a
+ * step that was never registered.
  */
 class Pipeline
 {
     /**
-     * Step kinds, as registered by the verbs of the same name. The kind decides
-     * how feed() reads that step's return value.
+     * Step kinds, as registered by the verbs of the same name.
      */
     const GATEKEEPER = 'gatekeeper';
     const PREPROCESSOR = 'preprocessor';
     const MODEL = 'model';
     const STEP = 'step';
+
+    /**
+     * The interface a step class of each kind implements, and the method the
+     * pipeline calls on it. A model step has no interface: its target is an LLM
+     * adapter, which the pipeline calls through LLM::use()->prompt().
+     */
+    private const CONTRACTS = [
+        self::GATEKEEPER => [Gatekeeper::class, 'allows'],
+        self::PREPROCESSOR => [Preprocessor::class, 'process'],
+        self::STEP => [Step::class, 'handle'],
+    ];
 
     /**
      * Defined pipelines, keyed by name.
@@ -75,22 +98,23 @@ class Pipeline
     private string $name;
 
     /**
-     * Registered steps, keyed by alias. Each holds the step's kind, its target
-     * (class name, object or callable) and the method to call on that target,
-     * null for a callable.
-     * @var array<string, array{kind: string, target: mixed, method: string|null}>
+     * Registered steps, keyed by step name. Each holds the step's kind, its
+     * target - a step class name, an object, a closure, or an adapter class for
+     * a model step - and whether that target is called directly rather than
+     * through its interface.
+     * @var array<string, array{kind: string, target: mixed, callable: bool}>
      */
     private array $steps = [];
 
     /**
-     * Objects built for class-name steps, keyed by step alias, so a step class
-     * is constructed once per pipeline rather than once per run.
+     * Objects built for class-name steps, keyed by step name, so a step class is
+     * constructed once per pipeline rather than once per run.
      * @var array<string, object>
      */
     private array $instances = [];
 
     /**
-     * Routes, keyed by name, each a list of step aliases in the order they run.
+     * Routes, keyed by name, each a list of step names in the order they run.
      * @var array<string, string[]>
      */
     private array $routes = [];
@@ -139,7 +163,7 @@ class Pipeline
      *
      * The pipeline is shared, so followRoute() and configure() on it affect
      * every later run. That is what makes `Pipeline::use('x')->followRoute('y')
-     * ->feed($input)` cheap to call from a controller, a command or a job.
+     * ->feed($prompt)` cheap to call from a controller, a command or a job.
      *
      * @param string $name the name passed to make()
      *
@@ -186,8 +210,8 @@ class Pipeline
      * Adds settings that every run of this pipeline can read.
      *
      * Settings are the pipeline's fixed configuration, such as a currency or a
-     * hop limit. Steps read them with `$context->setting('currency')`. Calling
-     * configure() again merges, so a later call can override one setting
+     * token budget. Steps read them with `$context->setting('currency')`.
+     * Calling configure() again merges, so a later call can override one setting
      * without repeating the rest.
      *
      * @param array<string, mixed> $settings
@@ -210,113 +234,132 @@ class Pipeline
     }
 
     /**
-     * Registers a step with no special handling of its return value.
+     * Registers a step that can stop the run.
      *
-     * This is the primitive the other verbs wrap: gatekeeper(), preprocessor()
-     * and model() all call it with a different $kind. Use step() directly for
-     * work that is none of those things, such as writing to storage.
+     * The class implements Gatekeeper, and its allows() decides whether the rest
+     * of the route happens: returning false stops the run, and feed() returns
+     * the Context with wasStopped() true and stoppedAt() naming this step.
+     * Stopping is not an error, so nothing is thrown.
      *
-     * The step is registered under an alias, and routes refer to it by that
-     * alias. The alias defaults to the method name, which is why
-     * `->preprocessor(FileStorage::class, 'save_attachments')` can be listed in
-     * a route as 'save_attachments'. A callable has no method name, so it needs
-     * an explicit $as.
-     *
-     * @param callable|object|string $target a class name to build, an object to
-     *                                       call, or a callable taking the Context
-     * @param string|null            $method method to call on $target; null when
-     *                                       $target is a callable
-     * @param string|null            $as     alias for routes; defaults to $method
-     * @param string                $kind    one of the kind constants, which
-     *                                       decides how feed() reads the return
+     * @param string                 $name   the step's name, as routes refer to it
+     * @param callable|object|string $target a class implementing Gatekeeper, an
+     *                                       object of one, or a closure
      * @return $this
      *
-     * @throws LLMException if the alias is missing or already used, or if
-     *                      $target is a known class or object without $method
+     * @throws LLMException if the name is already used, or the class does not
+     *                      implement Gatekeeper
      */
-    public function step(
-        callable|object|string $target,
-        ?string $method = null,
-        ?string $as = null,
-        string $kind = self::STEP
-    ): static {
-        $alias = $as ?? $method;
-        if ($alias === null) {
+    public function gatekeeper(string $name, callable|object|string $target): static
+    {
+        return $this->step($name, $target, self::GATEKEEPER);
+    }
+
+    /**
+     * Registers a step that prepares what the model needs.
+     *
+     * The class implements Preprocessor, and its process() gathers or reshapes:
+     * saving uploads, looking up a customer, fetching documents. What belongs in
+     * the prompt goes into the prompt's context sections
+     * (`$context->prompt()->addContext(...)`), and the array it returns holds
+     * what the run needs but the model does not.
+     *
+     * @param string                 $name   the step's name, as routes refer to it
+     * @param callable|object|string $target a class implementing Preprocessor,
+     *                                       an object of one, or a closure
+     * @return $this
+     *
+     * @throws LLMException if the name is already used, or the class does not
+     *                      implement Preprocessor
+     */
+    public function preprocessor(string $name, callable|object|string $target): static
+    {
+        return $this->step($name, $target, self::PREPROCESSOR);
+    }
+
+    /**
+     * Registers the step that sends the run's prompt to a model.
+     *
+     * The target is one of the framework's adapters - a concrete subclass of
+     * Jambura\LLM - and the pipeline does the call itself:
+     *
+     *     \Jambura\LLM::use($adapter)->prompt($context->prompt());
+     *
+     * So a model step needs no class of your own. The prompt it sends is the one
+     * fed to feed() plus whatever the preprocessors added to it, the adapter
+     * decides the format and order, and the reply is written to the Context as
+     * 'response'.
+     *
+     * The adapter is registered with Jambura\LLM here, so a pipeline definition
+     * does not need a separate registerModels() call for it.
+     *
+     * Work around the call belongs in its own step: parse or validate the reply
+     * in a step() after this one, and prepare the prompt in a preprocessor
+     * before it.
+     *
+     * @param string $name    the step's name, as routes refer to it
+     * @param string $adapter an adapter class name, for example
+     *                        \AIModel\Claude::class
+     * @return $this
+     *
+     * @throws LLMException if the name is already used, or the class is not a
+     *                      concrete Jambura\LLM adapter
+     */
+    public function model(string $name, string $adapter): static
+    {
+        if (isset($this->steps[$name])) {
+            throw new LLMException("Pipeline '{$this->name}' already has a step called '$name'");
+        }
+        if (!class_exists($adapter)) {
+            throw new LLMException("Step '$name' names the adapter class $adapter, which does not exist");
+        }
+        if (!is_subclass_of($adapter, \Jambura\LLM::class)) {
             throw new LLMException(
-                'A callable step needs an alias: pass $as so routes can name it'
+                "Step '$name' is a model step, so $adapter must be an adapter extending "
+                . \Jambura\LLM::class . '. Use step() for work that is not a model call'
             );
         }
-        if (isset($this->steps[$alias])) {
-            throw new LLMException("Pipeline '{$this->name}' already has a step called '$alias'");
-        }
-        if ($method !== null) {
-            $this->checkMethod($target, $method, $alias);
-        }
+        \Jambura\LLM::registerModels([$adapter]);
 
-        $this->steps[$alias] = ['kind' => $kind, 'target' => $target, 'method' => $method];
+        $this->steps[$name] = ['kind' => self::MODEL, 'target' => $adapter, 'callable' => false];
         return $this;
     }
 
     /**
-     * Registers a step that can stop the run.
+     * Registers a step with no special handling of its return value.
      *
-     * A gatekeeper decides whether the rest of the route should happen at all:
-     * an upload with no attachment, a request over quota, a user without
-     * permission. Returning false stops the run, and feed() returns the Context
-     * with wasStopped() true and stoppedAt() naming this step. Returning an
-     * array carries on and adds those values, and any other return carries on.
+     * This is the primitive the other verbs wrap: gatekeeper(), preprocessor()
+     * and model() each call it with a different $kind. Use step() directly for
+     * work that is none of those, such as filing a result or notifying someone.
+     * The class implements Step, and its handle() does the work.
      *
-     * Stopping is not an error, so nothing is thrown. Throw from the step
-     * itself if the caller should handle a failure instead.
-     *
-     * @see step() for the $target, $method and $as arguments
+     * @param string                 $name   the step's name, as routes refer to it
+     * @param callable|object|string $target a class implementing the kind's
+     *                                       interface, an object of one, or a
+     *                                       closure
+     * @param string                 $kind   one of the kind constants
      * @return $this
+     *
+     * @throws LLMException if the kind is unknown, the name is already used, or
+     *                      the target does not implement the kind's interface
      */
-    public function gatekeeper(callable|object|string $target, ?string $method = null, ?string $as = null): static
+    public function step(string $name, callable|object|string $target, string $kind = self::STEP): static
     {
-        return $this->step($target, $method, $as, self::GATEKEEPER);
-    }
+        if (!isset(self::CONTRACTS[$kind])) {
+            throw new LLMException(
+                "Unknown step kind '$kind'. Use one of: " . implode(', ', array_keys(self::CONTRACTS))
+            );
+        }
 
-    /**
-     * Registers a step that adds to the Context before the model runs.
-     *
-     * A preprocessor gathers or reshapes what the model will need: saving
-     * uploads, looking up a customer, fetching documents. Returning an array
-     * merges those values into the Context, so the next steps can read them.
-     *
-     * When what it gathers belongs in the prompt, add it to the prompt's own
-     * context sections rather than building text for the model step to paste
-     * together:
-     *
-     *     $context->prompt()->addContext('retrieved', $vendor->summary());
-     *
-     * @see step() for the $target, $method and $as arguments
-     * @return $this
-     */
-    public function preprocessor(callable|object|string $target, ?string $method = null, ?string $as = null): static
-    {
-        return $this->step($target, $method, $as, self::PREPROCESSOR);
-    }
+        $isCallable = !is_string($target) && !(is_object($target) && !$target instanceof \Closure);
+        if (isset($this->steps[$name])) {
+            throw new LLMException("Pipeline '{$this->name}' already has a step called '$name'");
+        }
+        if (!$isCallable) {
+            $this->checkContract($target, $kind, $name);
+        }
 
-    /**
-     * Registers the step that calls a model.
-     *
-     * A model step sends the run's prompt through an adapter, which is usually
-     * one line:
-     *
-     *     return LLM::use(\AIModel\Claude::class)->prompt($context->prompt());
-     *
-     * The prompt is the one fed to feed(), plus whatever the preprocessors added
-     * to it. Returning a string writes it to the Context as 'response';
-     * returning an array merges it instead, for a step that also reports tokens
-     * used or a parsed result.
-     *
-     * @see step() for the $target, $method and $as arguments
-     * @return $this
-     */
-    public function model(callable|object|string $target, ?string $method = null, ?string $as = null): static
-    {
-        return $this->step($target, $method, $as, self::MODEL);
+        $this->steps[$name] = ['kind' => $kind, 'target' => $target, 'callable' => $isCallable];
+        return $this;
     }
 
     /**
@@ -324,14 +367,14 @@ class Pipeline
      *
      * A pipeline can hold several routes over the same steps, for example a
      * 'default' route and a 'retry' route that skips the expensive parts. The
-     * aliases are checked when the route runs, not here, so steps and routes
+     * step names are checked when the route runs, not here, so steps and routes
      * can be declared in any order.
      *
-     * Defining a route twice replaces it, which keeps a definition file
-     * editable without worrying about order.
+     * Defining a route twice replaces it, which keeps a definition file editable
+     * without worrying about order.
      *
      * @param string   $name  route name, as followRoute() will ask for it
-     * @param string[] $steps step aliases, in the order they should run
+     * @param string[] $steps step names, in the order they should run
      * @return $this
      */
     public function route(string $name, array $steps): static
@@ -364,7 +407,7 @@ class Pipeline
     }
 
     /**
-     * Runs the chosen route over this input and returns the finished Context.
+     * Runs the chosen route over this prompt and returns the finished Context.
      *
      * The run carries the Prompt, and $values carries everything that is not
      * part of the prompt: uploaded files, a user id, a record id. Steps reach
@@ -376,12 +419,12 @@ class Pipeline
      *
      * Steps run in the route's order until the route ends or a gatekeeper stops
      * the run. The route is the one followRoute() chose, or 'default' when it
-     * exists and nothing was chosen. Every alias in the route is checked before
+     * exists and nothing was chosen. Every name in the route is checked before
      * the first step runs, so a route with a typo in it does no work at all.
      *
      * @param Prompt               $prompt the prompt this run sends
-     * @param array<string, mixed> $values data the run needs that is not part
-     *                                     of the prompt
+     * @param array<string, mixed> $values data the run needs that is not part of
+     *                                     the prompt
      * @return Context the finished run: its prompt, its values including
      *                 'response' from a model step, and what happened
      *
@@ -398,8 +441,8 @@ class Pipeline
             );
         }
 
-        $aliases = $this->routes[$route];
-        $unknown = array_diff($aliases, array_keys($this->steps));
+        $names = $this->routes[$route];
+        $unknown = array_diff($names, array_keys($this->steps));
         if ($unknown) {
             throw new LLMException(
                 "Route '$route' of pipeline '{$this->name}' names steps that were never "
@@ -408,13 +451,13 @@ class Pipeline
         }
 
         $context = new Context(clone $prompt, $values, $this->settings);
-        foreach ($aliases as $alias) {
-            $result = $this->callStep($alias, $context);
-            $context->markRan($alias);
+        foreach ($names as $name) {
+            $result = $this->callStep($name, $context);
+            $context->markRan($name);
 
-            $kind = $this->steps[$alias]['kind'];
+            $kind = $this->steps[$name]['kind'];
             if ($kind === self::GATEKEEPER && $result === false) {
-                $context->markStopped($alias);
+                $context->markStopped($name);
                 return $context;
             }
             if (is_array($result)) {
@@ -427,7 +470,7 @@ class Pipeline
     }
 
     /**
-     * The steps registered so far, as alias => kind.
+     * The steps registered so far, as name => kind.
      *
      * For tests, and for showing what a pipeline is made of.
      *
@@ -439,7 +482,7 @@ class Pipeline
     }
 
     /**
-     * The routes defined so far, as name => step aliases.
+     * The routes defined so far, as route name => step names.
      *
      * @return array<string, string[]>
      */
@@ -451,45 +494,52 @@ class Pipeline
     /**
      * Calls one step with the run's Context and returns what it returned.
      *
-     * A callable is called directly. For a class name or object the method
-     * registered with the step is called, and a class name is built once and
-     * kept for later runs.
+     * A model step sends the run's prompt through its adapter. A closure is
+     * called directly. A class name or object is called through the method its
+     * kind's interface declares, and a class name is built once and kept for
+     * later runs.
      *
      * @return mixed whatever the step returned
      */
-    private function callStep(string $alias, Context $context): mixed
+    private function callStep(string $name, Context $context): mixed
     {
-        $step = $this->steps[$alias];
-        if ($step['method'] === null) {
+        $step = $this->steps[$name];
+        if ($step['kind'] === self::MODEL) {
+            return \Jambura\LLM::use($step['target'])->prompt($context->prompt());
+        }
+        if ($step['callable']) {
             return ($step['target'])($context);
         }
-        if (!isset($this->instances[$alias])) {
-            $target = $step['target'];
-            $object = is_string($target) ? new $target() : $target;
-            $this->checkMethod($object, $step['method'], $alias);
-            $this->instances[$alias] = $object;
+        if (!isset($this->instances[$name])) {
+            $this->instances[$name] = is_string($step['target']) ? new $step['target']() : $step['target'];
         }
-        return $this->instances[$alias]->{$step['method']}($context);
+        $method = self::CONTRACTS[$step['kind']][1];
+        return $this->instances[$name]->$method($context);
     }
 
     /**
-     * Checks that a step's target has the method the step names.
+     * Checks that a step's class implements the interface its kind requires.
      *
-     * Runs at registration when the class is already loaded, and otherwise the
-     * first time the step runs, once the autoloader has had a chance.
+     * Runs at registration, so a class that is missing its interface, or was
+     * registered under the wrong verb, fails where the pipeline is defined.
      *
-     * @param callable|object|string $target
+     * @param object|string $target class name or object
      *
-     * @throws LLMException if the method is missing
+     * @throws LLMException if the class does not exist or does not implement the
+     *                      kind's interface
      */
-    private function checkMethod(callable|object|string $target, string $method, string $alias): void
+    private function checkContract(object|string $target, string $kind, string $name): void
     {
+        [$interface, $method] = self::CONTRACTS[$kind];
         if (is_string($target) && !class_exists($target)) {
-            return;
+            throw new LLMException("Step '$name' names the class $target, which does not exist");
         }
-        if (!method_exists($target, $method)) {
+        if (!is_a($target, $interface, true)) {
             $class = is_object($target) ? get_class($target) : $target;
-            throw new LLMException("Step '$alias' calls $class::$method(), which does not exist");
+            throw new LLMException(
+                "Step '$name' is registered as a $kind, so $class must implement $interface "
+                . "($method(Context)). Pass a closure instead for a step too small for a class"
+            );
         }
     }
 }

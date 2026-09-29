@@ -463,10 +463,13 @@ use Jambura\LLM\Pipeline;
 
 Pipeline::make('mates_receipt')
     ->configure(['currency' => 'CAD'])
-    ->gatekeeper(AttachmentGuard::class, 'check_attachment')
-    ->preprocessor(FileStorage::class, 'save_attachments')
-    ->model(ReceiptReader::class, 'read_receipt')
-    ->route('default', ['check_attachment', 'save_attachments', 'read_receipt']);
+    ->gatekeeper('check_attachment', AttachmentGuard::class)
+    ->preprocessor('save_attachments', FileStorage::class)
+    ->preprocessor('attach_vendor', VendorLookup::class)
+    ->model('process_document', AIModel\Claude::class)
+    ->step('file_receipt', ReceiptFiler::class)
+    ->route('default', ['check_attachment', 'save_attachments', 'attach_vendor', 'process_document', 'file_receipt'])
+    ->route('retry', ['process_document', 'file_receipt']);
 ```
 
 ```php
@@ -479,56 +482,47 @@ $context = Pipeline::use('mates_receipt')->followRoute('default')->feed($prompt,
     'user_id'     => $userId,
 ]);
 
-$context->get('response');   // what the model step produced
+$context->get('response');   // the model's reply
 $context->prompt();          // the prompt as the steps left it
-$context->ranSteps();        // ['check_attachment', 'save_attachments', 'read_receipt']
+$context->ranSteps();        // the steps that ran, in order
 $context->wasStopped();      // true when a gatekeeper ended the run early
 ```
 
-`feed()` takes a `Prompt` and nothing else, for the same reason `LLM::prompt()` does: a run
-always carries the structured prompt, and no step has to guess what a loose string was
-meant to be. Anything that isn't part of the prompt - uploads, ids, records - travels
-beside it as the run's values, the second argument. The prompt is copied before the run, so
-steps add to the run's own copy and the object you passed stays as it was, ready to feed to
-another pipeline.
+**The verbs.** Each registers one step. The step's name comes first, because that is what
+routes refer to, and the kind decides both what the step must implement and what the
+pipeline does with what it returns:
 
-**The verbs.** Each registers one step and decides what the pipeline does with what that
-step returns:
+| Verb | The step is | It must | Its return value |
+|---|---|---|---|
+| `gatekeeper()` | a check that can stop the run | implement `Gatekeeper`: `allows(Context): bool\|array` | `false` stops the run; an array adds values |
+| `preprocessor()` | preparation before the model | implement `Preprocessor`: `process(Context): array` | the array adds values to the context |
+| `model()` | the model call | be an **adapter** - a `Jambura\LLM` subclass | the reply is stored as `response` |
+| `step()` | anything else, such as filing the result | implement `Step`: `handle(Context): mixed` | an array adds values |
 
-| Verb | What the step is for | What its return value does |
-|---|---|---|
-| `gatekeeper()` | deciding whether the rest should run at all | `false` stops the run; an array adds values |
-| `preprocessor()` | gathering or reshaping what the model needs, including adding to the prompt | an array adds values to the context |
-| `model()` | calling a model through an adapter | a string is stored as `response`; an array adds values |
-| `step()` | anything else, such as storing the result | an array adds values |
+The method is never named in the definition: it comes from the interface, so a step class
+has one entry point.
 
-All four take the same targets: a class name, an object, or a callable. A class name is
-built once per pipeline, so such a class needs a constructor that takes no arguments; pass
-a ready-made object when the step has dependencies. Every step is called with the run's
-`Context` as its only argument.
-
-**Aliases.** A step is registered under an alias, which defaults to the method name, and
-routes refer to steps by alias. `as:` renames one, and a callable needs it:
+**A model step needs no class of your own.** It names one of your adapters, and the
+pipeline sends the run's prompt through it:
 
 ```php
-->preprocessor(FileStorage::class, 'save_attachments', as: 'store_files')
-->step(fn (Context $context) => ['queued' => true], as: 'flag_for_human')
+->model('process_document', AIModel\Claude::class)   // LLM::use(...)->prompt($context->prompt())
 ```
 
-**Routes.** `route()` names an order, and a pipeline can hold several over the same steps,
-for example a `default` route and a `retry` route that skips the expensive parts.
-`followRoute()` picks one and the choice sticks to the pipeline; `feed()` falls back to
-`default` when nothing was chosen. Steps and routes can be declared in any order, and
-every alias in a route is checked before the first step runs, so a typo does no work.
+The adapter is registered with `Jambura\LLM` for you, and it decides the format and order
+as always. Work around the call belongs in its own step: prepare the prompt in a
+preprocessor before it, and parse or validate the reply in a `step()` after it.
 
 **Steps work on the run's prompt.** A preprocessor adds what it found to the prompt's own
-context sections, rather than assembling text of its own, and the model step sends that
-prompt through an adapter:
+context sections rather than assembling text of its own:
 
 ```php
-class VendorLookup
+use Jambura\LLM\Context;
+use Jambura\LLM\Preprocessor;
+
+class VendorLookup implements Preprocessor
 {
-    public function attach_vendor(Context $context): array
+    public function process(Context $context): array
     {
         $vendor = Vendor::findBy($context->get('user_id'));
         $context->prompt()->addContext('retrieved', "Vendor: {$vendor->name}");
@@ -536,29 +530,46 @@ class VendorLookup
         return ['vendor_id' => $vendor->id];
     }
 }
-
-class ReceiptReader
-{
-    public function read_receipt(Context $context): string
-    {
-        return LLM::use(AIModel\Claude::class)->prompt($context->prompt());
-    }
-}
 ```
 
 A step that would rather replace the prompt than add to it calls
 `$context->setPrompt($other)`, which is what a filtering or trimming step does.
 
+**Closures** stand in for any verb where a class would be too much, and take the same name
+argument:
+
+```php
+->gatekeeper('positive_total', fn (Context $c) => $c->get('total') > 0)
+->step('flag_for_human', fn (Context $c) => ['queued' => true])
+```
+
+They follow the same return rules, but can't be reused across pipelines and won't appear as
+a named class in a stack trace.
+
+**Routes.** `route()` names an order, and a pipeline can hold several over the same steps -
+a `default` route and a `retry` route that skips the expensive parts. `followRoute()` picks
+one and the choice sticks to the pipeline; `feed()` falls back to `default` when nothing was
+chosen. Steps and routes can be declared in any order, and every name in a route is checked
+before the first step runs, so a typo does no work.
+
+**`feed()` takes a `Prompt` and nothing else**, for the same reason `LLM::prompt()` does: a
+run always carries the structured prompt, and no step has to guess what a loose string was
+meant to be. Anything that isn't part of the prompt - uploads, ids, records - travels beside
+it as the run's values, the second argument. The prompt is copied before the run, so steps
+add to the run's own copy and the object you passed stays as it was, ready to feed to
+another pipeline.
+
 **The context.** `prompt()` and `setPrompt()` reach the run's prompt; `get()`, `set()`,
 `merge()`, `has()` and `all()` carry the run's values; `setting()` reads what `configure()`
-was given. `ranSteps()`, `wasStopped()` and
-`stoppedAt()` say what happened, which is what you log or assert on.
+was given. `ranSteps()`, `wasStopped()` and `stoppedAt()` say what happened, which is what
+you log or assert on.
 
-**Errors.** Everything throws `Jambura\LLM\LLMException`, and every case is a mistake in
-the definition or the call: an unknown pipeline or route, a name defined twice, a route
-naming a step that was never registered, or a step method that doesn't exist. A gatekeeper
-stopping a run is not one of them: `feed()` returns the context with `wasStopped()` true,
-so the caller decides what that means.
+**Errors.** Everything throws `Jambura\LLM\LLMException`, and every case is a mistake in the
+definition or the call: an unknown pipeline or route, a name used twice, a step class that
+doesn't implement its verb's interface or a model step that isn't an adapter, or a route
+naming a step that was never registered. A gatekeeper stopping a run is not one of them:
+`feed()` returns the context with `wasStopped()` true, so the caller decides what that
+means.
 
 ## Migrations
 
