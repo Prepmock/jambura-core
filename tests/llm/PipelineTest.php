@@ -22,11 +22,29 @@ class FileStore
     }
 }
 
+class VendorLookup
+{
+    public function attach_vendor(Context $context)
+    {
+        $context->prompt()->addContext('retrieved', 'Vendor: Acme');
+        return ['vendor' => 'Acme'];
+    }
+}
+
 class ReceiptReader
 {
     public function read_receipt(Context $context)
     {
         return 'read ' . $context->get('saved', 0) . ' file(s)';
+    }
+}
+
+class PromptReader
+{
+    public function read_receipt(Context $context)
+    {
+        $prompt = $context->prompt();
+        return $prompt->getTask() . ' | context: ' . json_encode($prompt->getContext());
     }
 }
 
@@ -107,9 +125,9 @@ class PipelineTest extends TestCase
     {
         $this->receiptPipeline();
 
-        $context = Pipeline::use('receipts')->followRoute('default')->feed([
-            'attachments' => ['a.pdf', 'b.pdf'],
-        ]);
+        $context = Pipeline::use('receipts')
+            ->followRoute('default')
+            ->feed($this->prompt(), ['attachments' => ['a.pdf', 'b.pdf']]);
 
         $this->assertSame(
             ['check_attachment', 'save_attachments', 'read_receipt'],
@@ -126,12 +144,56 @@ class PipelineTest extends TestCase
     {
         $this->receiptPipeline();
 
-        $context = Pipeline::use('receipts')->followRoute('default')->feed(['attachments' => []]);
+        $context = Pipeline::use('receipts')->followRoute('default')->feed($this->prompt(), ['attachments' => []]);
 
         $this->assertSame(['check_attachment'], $context->ranSteps());
         $this->assertTrue($context->wasStopped());
         $this->assertSame('check_attachment', $context->stoppedAt());
         $this->assertNull($context->get('response'));
+    }
+
+    public function testFeedCopiesThePromptSoTheCallersPromptIsUnchanged(): void
+    {
+        Pipeline::make('receipts')
+            ->preprocessor(VendorLookup::class, 'attach_vendor')
+            ->route('default', ['attach_vendor']);
+        $prompt = $this->prompt();
+
+        $context = Pipeline::use('receipts')->feed($prompt);
+
+        $this->assertSame(['retrieved' => ['Vendor: Acme']], $context->prompt()->getContext());
+        $this->assertSame([], $prompt->getContext());
+        $this->assertNotSame($prompt, $context->prompt());
+    }
+
+    public function testWhatAPreprocessorAddsToThePromptReachesTheModelStep(): void
+    {
+        Pipeline::make('receipts')
+            ->preprocessor(VendorLookup::class, 'attach_vendor')
+            ->model(PromptReader::class, 'read_receipt')
+            ->route('default', ['attach_vendor', 'read_receipt']);
+
+        $context = Pipeline::use('receipts')->feed($this->prompt());
+
+        $this->assertSame(
+            'Extract the total. | context: {"retrieved":["Vendor: Acme"]}',
+            $context->get('response')
+        );
+    }
+
+    public function testAStepCanReplaceThePromptForLaterSteps(): void
+    {
+        Pipeline::make('receipts')
+            ->preprocessor(function (Context $context) {
+                $context->setPrompt(Prompt::create()->setTask('Trimmed task'));
+                return [];
+            }, as: 'trim')
+            ->model(PromptReader::class, 'read_receipt')
+            ->route('default', ['trim', 'read_receipt']);
+
+        $context = Pipeline::use('receipts')->feed($this->prompt());
+
+        $this->assertStringStartsWith('Trimmed task', $context->get('response'));
     }
 
     public function testAModelReturningAnArrayMergesInsteadOfWritingResponse(): void
@@ -140,7 +202,7 @@ class PipelineTest extends TestCase
             ->model(ParsingReader::class, 'read_receipt')
             ->route('default', ['read_receipt']);
 
-        $context = Pipeline::use('receipts')->feed('a receipt');
+        $context = Pipeline::use('receipts')->feed($this->prompt());
 
         $this->assertSame('parsed', $context->get('response'));
         $this->assertSame(12, $context->get('tokens'));
@@ -155,18 +217,7 @@ class PipelineTest extends TestCase
             ->route('default', ['save_attachments']);
 
         $this->assertSame(['currency' => 'CAD', 'token_budget' => 8000], $pipeline->settings());
-        $this->assertSame('CAD', $pipeline->feed([])->get('currency'));
-    }
-
-    public function testFeedTurnsAStringIntoInputAndAPromptIntoPrompt(): void
-    {
-        $prompt = Prompt::create()->setTask('Summarize');
-        Pipeline::make('receipts')
-            ->step(fn (Context $context) => null, as: 'noop')
-            ->route('default', ['noop']);
-
-        $this->assertSame('a receipt', Pipeline::use('receipts')->feed('a receipt')->get('input'));
-        $this->assertSame($prompt, Pipeline::use('receipts')->feed($prompt)->get('prompt'));
+        $this->assertSame('CAD', $pipeline->feed($this->prompt())->get('currency'));
     }
 
     public function testFeedFallsBackToTheDefaultRoute(): void
@@ -175,7 +226,7 @@ class PipelineTest extends TestCase
             ->model(ReceiptReader::class, 'read_receipt')
             ->route('default', ['read_receipt']);
 
-        $this->assertSame('read 0 file(s)', Pipeline::use('receipts')->feed()->get('response'));
+        $this->assertSame('read 0 file(s)', Pipeline::use('receipts')->feed($this->prompt())->get('response'));
     }
 
     public function testFeedWithoutAnyRouteToFollowThrows(): void
@@ -184,7 +235,7 @@ class PipelineTest extends TestCase
 
         $this->expectException(LLMException::class);
         $this->expectExceptionMessage("Pipeline 'receipts' has no route to follow");
-        Pipeline::use('receipts')->feed();
+        Pipeline::use('receipts')->feed($this->prompt());
     }
 
     public function testTheChosenRouteSticksForLaterRuns(): void
@@ -197,8 +248,8 @@ class PipelineTest extends TestCase
 
         $pipeline = Pipeline::use('receipts')->followRoute('quick');
 
-        $this->assertTrue($pipeline->feed()->get('skipped'));
-        $this->assertTrue(Pipeline::use('receipts')->feed()->get('skipped'));
+        $this->assertTrue($pipeline->feed($this->prompt())->get('skipped'));
+        $this->assertTrue(Pipeline::use('receipts')->feed($this->prompt())->get('skipped'));
     }
 
     public function testFollowingAnUnknownRouteThrowsAndNamesTheRoutesThereAre(): void
@@ -222,7 +273,7 @@ class PipelineTest extends TestCase
             ->route('default', ['first', 'typo']);
 
         try {
-            Pipeline::use('receipts')->feed();
+            Pipeline::use('receipts')->feed($this->prompt());
             $this->fail('Expected an LLMException');
         } catch (LLMException $e) {
             $this->assertStringContainsString('names steps that were never registered: typo', $e->getMessage());
@@ -255,7 +306,7 @@ class PipelineTest extends TestCase
             ->route('default', ['store_files']);
 
         $this->assertSame(['store_files' => Pipeline::PREPROCESSOR], $pipeline->definedSteps());
-        $this->assertSame(0, $pipeline->feed()->get('saved'));
+        $this->assertSame(0, $pipeline->feed($this->prompt())->get('saved'));
     }
 
     public function testAStepNamingAMethodTheClassDoesNotHaveThrows(): void
@@ -270,10 +321,10 @@ class PipelineTest extends TestCase
     public function testACallableStepIsGivenTheContext(): void
     {
         Pipeline::make('receipts')
-            ->preprocessor(fn (Context $context) => ['seen' => $context->get('input')], as: 'look')
+            ->preprocessor(fn (Context $context) => ['task' => $context->prompt()->getTask()], as: 'look')
             ->route('default', ['look']);
 
-        $this->assertSame('a receipt', Pipeline::use('receipts')->feed('a receipt')->get('seen'));
+        $this->assertSame('Extract the total.', Pipeline::use('receipts')->feed($this->prompt())->get('task'));
     }
 
     public function testAnObjectStepIsUsedAsGiven(): void
@@ -282,7 +333,7 @@ class PipelineTest extends TestCase
             ->preprocessor(new StatefulStep('receipts-v2'), 'stamp')
             ->route('default', ['stamp']);
 
-        $this->assertSame('receipts-v2', Pipeline::use('receipts')->feed()->get('tag'));
+        $this->assertSame('receipts-v2', Pipeline::use('receipts')->feed($this->prompt())->get('tag'));
     }
 
     public function testAStepClassIsBuiltOnceAcrossRuns(): void
@@ -291,8 +342,8 @@ class PipelineTest extends TestCase
             ->preprocessor(CountedStep::class, 'touch')
             ->route('default', ['touch']);
 
-        Pipeline::use('receipts')->feed();
-        $context = Pipeline::use('receipts')->feed();
+        Pipeline::use('receipts')->feed($this->prompt());
+        $context = Pipeline::use('receipts')->feed($this->prompt());
 
         $this->assertSame(1, CountedStep::$built);
         $this->assertSame(1, $context->get('built'));
@@ -321,5 +372,10 @@ class PipelineTest extends TestCase
             ->preprocessor(FileStore::class, 'save_attachments')
             ->model(ReceiptReader::class, 'read_receipt')
             ->route('default', ['check_attachment', 'save_attachments', 'read_receipt']);
+    }
+
+    private function prompt(): Prompt
+    {
+        return Prompt::create()->setType('receipt')->setTask('Extract the total.');
     }
 }

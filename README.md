@@ -470,15 +470,27 @@ Pipeline::make('mates_receipt')
 ```
 
 ```php
-$context = Pipeline::use('mates_receipt')->followRoute('default')->feed([
+$prompt = Prompt::create()
+    ->setType('receipt')
+    ->setTask('Extract the total and the vendor.');
+
+$context = Pipeline::use('mates_receipt')->followRoute('default')->feed($prompt, [
     'attachments' => $request->files('attachments'),
     'user_id'     => $userId,
 ]);
 
 $context->get('response');   // what the model step produced
+$context->prompt();          // the prompt as the steps left it
 $context->ranSteps();        // ['check_attachment', 'save_attachments', 'read_receipt']
 $context->wasStopped();      // true when a gatekeeper ended the run early
 ```
+
+`feed()` takes a `Prompt` and nothing else, for the same reason `LLM::prompt()` does: a run
+always carries the structured prompt, and no step has to guess what a loose string was
+meant to be. Anything that isn't part of the prompt - uploads, ids, records - travels
+beside it as the run's values, the second argument. The prompt is copied before the run, so
+steps add to the run's own copy and the object you passed stays as it was, ready to feed to
+another pipeline.
 
 **The verbs.** Each registers one step and decides what the pipeline does with what that
 step returns:
@@ -486,7 +498,7 @@ step returns:
 | Verb | What the step is for | What its return value does |
 |---|---|---|
 | `gatekeeper()` | deciding whether the rest should run at all | `false` stops the run; an array adds values |
-| `preprocessor()` | gathering or reshaping what the model needs | an array adds values to the context |
+| `preprocessor()` | gathering or reshaping what the model needs, including adding to the prompt | an array adds values to the context |
 | `model()` | calling a model through an adapter | a string is stored as `response`; an array adds values |
 | `step()` | anything else, such as storing the result | an array adds values |
 
@@ -509,26 +521,37 @@ for example a `default` route and a `retry` route that skips the expensive parts
 `default` when nothing was chosen. Steps and routes can be declared in any order, and
 every alias in a route is checked before the first step runs, so a typo does no work.
 
-**A model step** builds a `Prompt` and sends it through an adapter:
+**Steps work on the run's prompt.** A preprocessor adds what it found to the prompt's own
+context sections, rather than assembling text of its own, and the model step sends that
+prompt through an adapter:
 
 ```php
+class VendorLookup
+{
+    public function attach_vendor(Context $context): array
+    {
+        $vendor = Vendor::findBy($context->get('user_id'));
+        $context->prompt()->addContext('retrieved', "Vendor: {$vendor->name}");
+
+        return ['vendor_id' => $vendor->id];
+    }
+}
+
 class ReceiptReader
 {
     public function read_receipt(Context $context): string
     {
-        $prompt = Prompt::create()
-            ->setType('receipt')
-            ->addContext('dynamic', $context->get('input'))
-            ->addContext('static', 'Amounts are in ' . $context->setting('currency'))
-            ->setTask('Extract the total and the vendor.');
-
-        return LLM::use(AIModel\Claude::class)->prompt($prompt);
+        return LLM::use(AIModel\Claude::class)->prompt($context->prompt());
     }
 }
 ```
 
-**The context.** `get()`, `set()`, `merge()`, `has()` and `all()` carry the run's values;
-`setting()` reads what `configure()` was given. `ranSteps()`, `wasStopped()` and
+A step that would rather replace the prompt than add to it calls
+`$context->setPrompt($other)`, which is what a filtering or trimming step does.
+
+**The context.** `prompt()` and `setPrompt()` reach the run's prompt; `get()`, `set()`,
+`merge()`, `has()` and `all()` carry the run's values; `setting()` reads what `configure()`
+was given. `ranSteps()`, `wasStopped()` and
 `stoppedAt()` say what happened, which is what you log or assert on.
 
 **Errors.** Everything throws `Jambura\LLM\LLMException`, and every case is a mistake in

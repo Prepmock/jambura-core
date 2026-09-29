@@ -16,7 +16,14 @@ namespace Jambura\LLM;
  *         ->model(ReceiptReader::class, 'read_receipt')
  *         ->route('default', ['check_attachment', 'save_attachments', 'read_receipt']);
  *
- *     $context = Pipeline::use('mates_receipt')->followRoute('default')->feed($input);
+ *     $prompt = Prompt::create()
+ *         ->setType('receipt')
+ *         ->setTask('Extract the total and the vendor.');
+ *
+ *     $context = Pipeline::use('mates_receipt')
+ *         ->followRoute('default')
+ *         ->feed($prompt, ['attachments' => $files]);
+ *
  *     $context->get('response');
  *
  * The verb a step is registered with says what the pipeline does with what that
@@ -33,6 +40,11 @@ namespace Jambura\LLM;
  * constructible without arguments; pass a ready-made object when the step needs
  * dependencies. Whatever the target, a step is called with the run's Context as
  * its only argument.
+ *
+ * feed() takes a Prompt and nothing else, for the same reason LLM::prompt()
+ * does: a run always carries the structured prompt, and no step has to guess
+ * what a loose string was meant to be. Data that is not part of the prompt -
+ * uploads, ids, records - travels beside it as the run's values.
  *
  * Errors are `Jambura\LLM\LLMException`, and every one of them is a mistake in
  * the definition or the call: an unknown pipeline or route, a duplicate alias, a
@@ -272,6 +284,12 @@ class Pipeline
      * uploads, looking up a customer, fetching documents. Returning an array
      * merges those values into the Context, so the next steps can read them.
      *
+     * When what it gathers belongs in the prompt, add it to the prompt's own
+     * context sections rather than building text for the model step to paste
+     * together:
+     *
+     *     $context->prompt()->addContext('retrieved', $vendor->summary());
+     *
      * @see step() for the $target, $method and $as arguments
      * @return $this
      */
@@ -283,11 +301,15 @@ class Pipeline
     /**
      * Registers the step that calls a model.
      *
-     * A model step builds a Jambura\LLM\Prompt from the Context and sends it
-     * through an adapter, usually `LLM::use(SomeModel::class)->prompt($prompt)`.
-     * Returning a string writes it to the Context as 'response'; returning an
-     * array merges it instead, for a step that also reports tokens used or a
-     * parsed result.
+     * A model step sends the run's prompt through an adapter, which is usually
+     * one line:
+     *
+     *     return LLM::use(\AIModel\Claude::class)->prompt($context->prompt());
+     *
+     * The prompt is the one fed to feed(), plus whatever the preprocessors added
+     * to it. Returning a string writes it to the Context as 'response';
+     * returning an array merges it instead, for a step that also reports tokens
+     * used or a parsed result.
      *
      * @see step() for the $target, $method and $as arguments
      * @return $this
@@ -344,22 +366,29 @@ class Pipeline
     /**
      * Runs the chosen route over this input and returns the finished Context.
      *
-     * The input starts the Context off: an array is used as the Context's
-     * values, a string is stored as 'input', and a Prompt is stored as 'prompt'
-     * for a model step to send. Every step then runs in the route's order until
-     * the route ends or a gatekeeper stops it.
+     * The run carries the Prompt, and $values carries everything that is not
+     * part of the prompt: uploaded files, a user id, a record id. Steps reach
+     * the prompt with $context->prompt() and the values with $context->get().
      *
-     * The route is the one followRoute() chose, or 'default' when it exists and
-     * nothing was chosen. Every alias in the route is checked before the first
-     * step runs, so a route with a typo in it does no work at all.
+     * The prompt is copied first, so the steps add to the run's own prompt and
+     * the object the caller passed in is left as it was. That keeps a Prompt
+     * safe to build once and feed to several pipelines.
      *
-     * @param array<string, mixed>|string|Prompt $input what the run starts with
-     * @return Context the run's values, including 'response' from a model step
+     * Steps run in the route's order until the route ends or a gatekeeper stops
+     * the run. The route is the one followRoute() chose, or 'default' when it
+     * exists and nothing was chosen. Every alias in the route is checked before
+     * the first step runs, so a route with a typo in it does no work at all.
+     *
+     * @param Prompt               $prompt the prompt this run sends
+     * @param array<string, mixed> $values data the run needs that is not part
+     *                                     of the prompt
+     * @return Context the finished run: its prompt, its values including
+     *                 'response' from a model step, and what happened
      *
      * @throws LLMException if no route was chosen and there is no 'default'
      *                      route, or the route names a step that does not exist
      */
-    public function feed(array|string|Prompt $input = []): Context
+    public function feed(Prompt $prompt, array $values = []): Context
     {
         $route = $this->route ?? (isset($this->routes['default']) ? 'default' : null);
         if ($route === null) {
@@ -378,7 +407,7 @@ class Pipeline
             );
         }
 
-        $context = new Context($this->startingValues($input), $this->settings);
+        $context = new Context(clone $prompt, $values, $this->settings);
         foreach ($aliases as $alias) {
             $result = $this->callStep($alias, $context);
             $context->markRan($alias);
@@ -417,20 +446,6 @@ class Pipeline
     public function definedRoutes(): array
     {
         return $this->routes;
-    }
-
-    /**
-     * Turns feed()'s input into the Context's starting values.
-     *
-     * @param array<string, mixed>|string|Prompt $input
-     * @return array<string, mixed>
-     */
-    private function startingValues(array|string|Prompt $input): array
-    {
-        if (is_array($input)) {
-            return $input;
-        }
-        return $input instanceof Prompt ? ['prompt' => $input] : ['input' => $input];
     }
 
     /**

@@ -4,17 +4,29 @@ namespace Jambura\LLM;
 /**
  * The state one pipeline run carries from step to step.
  *
- * Pipeline::feed() builds a Context from the input it is given and the
- * pipeline's configure() settings, passes it to every step in the route, and
- * returns it to the caller. Each step reads what earlier steps left here and
- * adds its own values, so a Context is both the working state of a run and its
- * result.
+ * Pipeline::feed() builds a Context from the Prompt it is fed, the run's own
+ * values and the pipeline's configure() settings, passes it to every step in
+ * the route, and returns it to the caller. Each step reads what earlier steps
+ * left here and adds its own, so a Context is both the working state of a run
+ * and its result.
  *
- * Values and settings are kept apart: values are written during the run,
- * settings are the pipeline's fixed configuration and are read-only here.
+ * Three things live here, and they are deliberately separate:
+ *
+ * - The Prompt, reached with prompt(). It is the structured prompt the model
+ *   step will send, and preprocessors add to its context sections rather than
+ *   assembling text of their own.
+ * - Values, the run's working data: uploads, a customer record, a parsed
+ *   result. Steps read and write them with get(), set() and merge().
+ * - Settings, the pipeline's fixed configure() options, read-only here.
  */
 class Context
 {
+    /**
+     * The prompt this run is building and will send.
+     * @var Prompt
+     */
+    private Prompt $prompt;
+
     /**
      * Values the run has collected so far, keyed by name.
      * @var array<string, mixed>
@@ -40,13 +52,45 @@ class Context
     private ?string $stoppedAt = null;
 
     /**
-     * @param array<string, mixed> $values   the input the run starts with
+     * @param Prompt               $prompt   the prompt the run will send
+     * @param array<string, mixed> $values   data the run starts with
      * @param array<string, mixed> $settings the pipeline's configure() settings
      */
-    public function __construct(array $values = [], array $settings = [])
+    public function __construct(Prompt $prompt, array $values = [], array $settings = [])
     {
+        $this->prompt = $prompt;
         $this->values = $values;
         $this->settings = $settings;
+    }
+
+    /**
+     * The prompt this run is building.
+     *
+     * Returned as it stands, so a preprocessor can add to it in place:
+     *
+     *     $context->prompt()->addContext('retrieved', $vendor->summary());
+     *
+     * Pipeline::feed() copies the caller's Prompt before the run, so adding to
+     * it here never changes the object the caller passed in. A model step sends
+     * this prompt, usually with LLM::use(...)->prompt($context->prompt()).
+     */
+    public function prompt(): Prompt
+    {
+        return $this->prompt;
+    }
+
+    /**
+     * Replaces the prompt for the steps that come after this one.
+     *
+     * For a step that builds a new Prompt rather than adding to this one, such
+     * as a filter that returns a trimmed copy.
+     *
+     * @return $this
+     */
+    public function setPrompt(Prompt $prompt): static
+    {
+        $this->prompt = $prompt;
+        return $this;
     }
 
     /**
