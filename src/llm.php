@@ -4,6 +4,8 @@ namespace Jambura;
 use Jambura\LLM\Format;
 use Jambura\LLM\LLMException;
 use Jambura\LLM\Prompt;
+use Jambura\LLM\PromptRejected;
+use Jambura\LLM\Reducer;
 
 /**
  * Registry of model adapters, and the base class each adapter extends.
@@ -32,6 +34,14 @@ abstract class LLM
      * @var array<string, LLM|null>
      */
     private static array $models = [];
+
+    /**
+     * Registered reducers, in the order they run. A list rather than a map
+     * keyed by class, because order is the point and the same reducer class may
+     * be registered twice with different settings.
+     * @var Reducer[]
+     */
+    private static array $reducers = [];
 
     /**
      * Model id sent to the provider's API.
@@ -115,8 +125,67 @@ abstract class LLM
     }
 
     /**
+     * Registers reducers, which trim every prompt before it is formatted.
+     *
+     * Reducers are global rather than per adapter: what a prompt should contain
+     * does not change with the model it is going to. They run in the order
+     * registered, and this appends, so registering twice runs them twice — do it
+     * once, where the application boots.
+     *
+     * Each entry is either a class name, built here with no constructor
+     * arguments, or a ready-made Reducer, which is how one carrying settings is
+     * registered:
+     *
+     *     LLM::registerReducers([
+     *         DropEmptyContext::class,
+     *         new ContextFilter(['receipt' => ['static', 'retrieved']]),
+     *     ]);
+     *
+     * Everything is checked here, so a mistake fails at bootstrap rather than on
+     * the first prompt.
+     *
+     * @param array<string|Reducer> $reducers reducer class names or instances
+     *
+     * @throws LLMException if a class does not exist, is not a concrete Reducer,
+     *                      needs constructor arguments, or returns types() that
+     *                      are not a list of non-empty strings
+     */
+    public static function registerReducers(array $reducers): void
+    {
+        foreach ($reducers as $reducer) {
+            if (!$reducer instanceof Reducer) {
+                $reducer = self::buildReducer($reducer);
+            }
+            self::checkTypes($reducer);
+            self::$reducers[] = $reducer;
+        }
+    }
+
+    /**
+     * The registered reducers, in the order they run.
+     *
+     * @return Reducer[]
+     */
+    public static function reducers(): array
+    {
+        return self::$reducers;
+    }
+
+    /**
+     * Unregisters every reducer, leaving prompts to reach adapters untouched.
+     */
+    public static function forgetReducers(): void
+    {
+        self::$reducers = [];
+    }
+
+    /**
      * Sends a prompt to the model and returns its text reply.
      *
+     * Registered reducers run first, on a copy, so the prompt the caller holds
+     * is never changed by them and can be sent again or to another model.
+     *
+     * @throws PromptRejected if a reducer refused the prompt
      * @throws LLMException if the prompt has no task, or the API call fails
      */
     final public function prompt(Prompt $prompt): string
@@ -124,6 +193,13 @@ abstract class LLM
         if ($prompt->getTask() === null || trim($prompt->getTask()) === '') {
             throw new LLMException('A prompt needs a task');
         }
+
+        // Copied only when there is a reducer to run, so an application using
+        // none hands send() the very object it was given, as it always has.
+        if (self::$reducers) {
+            $prompt = self::reduce(clone $prompt);
+        }
+
         return $this->send($this->handlePrompt($prompt), $prompt);
     }
 
@@ -189,6 +265,94 @@ abstract class LLM
      * @throws LLMException if the call fails or returns no text
      */
     abstract protected function send(string $formattedPrompt, Prompt $prompt): string;
+
+    /**
+     * Runs the prompt through every reducer that applies to it.
+     *
+     * A reducer applies when its types() is empty, or names the prompt's type. A
+     * prompt whose type nothing is registered for, or which has no type at all,
+     * passes through the rest untouched rather than being refused: a type nobody
+     * has written a reducer for yet is not an error.
+     *
+     * @param Prompt $prompt a copy, which reducers may change in place
+     *
+     * @throws PromptRejected if a reducer refused the prompt
+     * @throws LLMException if a reducer returned a prompt with no task left
+     */
+    private static function reduce(Prompt $prompt): Prompt
+    {
+        $type = $prompt->getType();
+
+        foreach (self::$reducers as $reducer) {
+            $types = $reducer->types();
+            if ($types && ($type === null || !in_array($type, $types, true))) {
+                continue;
+            }
+
+            try {
+                $prompt = $reducer->reduce($prompt);
+            } catch (PromptRejected $rejection) {
+                throw $rejection->from($reducer::class);
+            }
+
+            // A reducer trims noise; dropping the task leaves nothing to ask. It
+            // would otherwise surface as an empty task in the formatted prompt,
+            // far from the reducer that caused it.
+            if ($prompt->getTask() === null || trim($prompt->getTask()) === '') {
+                throw new LLMException($reducer::class . '::reduce() returned a prompt with no task');
+            }
+        }
+
+        return $prompt;
+    }
+
+    /**
+     * Builds a reducer registered by class name.
+     *
+     * @throws LLMException if the class does not exist, is not a concrete
+     *                      Reducer, or cannot be built without arguments
+     */
+    private static function buildReducer(mixed $class): Reducer
+    {
+        if (!is_string($class)) {
+            throw new LLMException(
+                'A reducer must be a class name or an instance of ' . Reducer::class . ', ' . get_debug_type($class) . ' given'
+            );
+        }
+
+        $class = ltrim($class, '\\');
+        if (!class_exists($class)) {
+            throw new LLMException("Reducer class $class does not exist");
+        }
+
+        $reflection = new \ReflectionClass($class);
+        if (!$reflection->implementsInterface(Reducer::class) || $reflection->isAbstract()) {
+            throw new LLMException("Reducer class $class must be a concrete implementation of " . Reducer::class);
+        }
+
+        $constructor = $reflection->getConstructor();
+        if ($constructor && $constructor->getNumberOfRequiredParameters() > 0) {
+            throw new LLMException(
+                "Reducer class $class needs constructor arguments, so register it as an instance: new $class(...)"
+            );
+        }
+
+        return $reflection->newInstance();
+    }
+
+    /**
+     * @throws LLMException if types() is not a list of non-empty strings
+     */
+    private static function checkTypes(Reducer $reducer): void
+    {
+        foreach ($reducer->types() as $type) {
+            if (!is_string($type) || trim($type) === '') {
+                throw new LLMException(
+                    $reducer::class . '::types() must return prompt type names, or [] to run for every prompt'
+                );
+            }
+        }
+    }
 
     /**
      * @throws LLMException if $order names anything but SECTIONS, or repeats one

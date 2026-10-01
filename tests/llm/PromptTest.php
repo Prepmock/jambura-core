@@ -52,6 +52,34 @@ class PromptTest extends TestCase
         Prompt::create()->addContext('history', 'x');
     }
 
+    public function testRemoveContextEmptiesOnlyTheSectionsNamed(): void
+    {
+        $prompt = Prompt::create()
+            ->addContext('static', 'Port rules')
+            ->addContext('retrieved', 'ETA 14:00')
+            ->addContext('conversation', 'Earlier chatter');
+
+        $prompt->removeContext('static', 'conversation');
+
+        $this->assertSame(['retrieved' => ['ETA 14:00']], $prompt->getContext());
+    }
+
+    public function testRemoveContextAcceptsASectionThatIsAlreadyEmpty(): void
+    {
+        $prompt = Prompt::create()->addContext('retrieved', 'ETA 14:00');
+
+        $prompt->removeContext('static');
+
+        $this->assertSame(['retrieved' => ['ETA 14:00']], $prompt->getContext());
+    }
+
+    public function testRemoveContextRejectsAnUnknownSection(): void
+    {
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage("Unknown context section 'history'");
+        Prompt::create()->removeContext('history');
+    }
+
     public function testCarriesDocumentsInTheOrderTheyWereAdded(): void
     {
         $prompt = Prompt::create()
