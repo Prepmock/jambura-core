@@ -118,6 +118,31 @@ class Prompt
         return $this;
     }
 
+    /**
+     * Empties one or more context sections.
+     *
+     * The counterpart to addContext(), for a Reducer dropping the sections a
+     * particular kind of prompt has no use for. Emptying a section that holds
+     * nothing is not an error, so a reducer can name every section it does not
+     * want without first checking which of them arrived.
+     *
+     * @param string ...$sections sections to empty, each one of CONTEXT_SECTIONS
+     *
+     * @throws LLMException if a section is not one of CONTEXT_SECTIONS
+     */
+    public function removeContext(string ...$sections): static
+    {
+        foreach ($sections as $section) {
+            if (!array_key_exists($section, $this->context)) {
+                throw new LLMException(
+                    "Unknown context section '$section'. Use one of: " . implode(', ', self::CONTEXT_SECTIONS)
+                );
+            }
+            $this->context[$section] = [];
+        }
+        return $this;
+    }
+
     public function addInstruction(string ...$instructions): static
     {
         array_push($this->instructions, ...$instructions);

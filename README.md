@@ -638,6 +638,136 @@ $reply = LLM::use(AIModel\Example::class)->prompt($prompt);
   Give an adapter its defaults as property values and its settings through setters.
   `setModel()` and `getModel()` are already there for the model id.
 
+## Cutting the noise out of a prompt
+
+Context a prompt was never going to use still costs tokens, and still crowds the
+answer. `Jambura\LLM\Reducer` is a filter that trims a prompt on its way to a model:
+
+```
+Prompt → reducers → handlePrompt() (order + format) → send()
+```
+
+Reducers run inside `LLM::prompt()`, so no adapter changes and none can skip them.
+They work on the `Prompt` object rather than the formatted string, so one reducer
+serves every adapter whatever format or order it picks.
+
+**Register them once**, where the application boots:
+
+```php
+use Jambura\LLM;
+use Jambura\LLM\ContextFilter;
+
+LLM::registerReducers([
+    DropStaleConversation::class,                                 // built with no arguments
+    new ContextFilter(['receipt' => ['static', 'retrieved']]),    // one carrying settings
+]);
+```
+
+An entry is either a class name, which is built here and so must need no constructor
+arguments, or a ready-made reducer, which is how one with settings is registered.
+Everything is checked at registration: a class that doesn't exist, doesn't implement
+`Reducer`, is abstract, needs constructor arguments, or returns a bad `types()` throws
+`LLMException` at bootstrap rather than on the first prompt.
+
+Reducers are **global, not per adapter**: what a prompt should contain doesn't change
+with the model it is going to. They run in registration order, and `registerReducers()`
+**appends**, so calling it twice runs those reducers twice. `reducers()` lists them and
+`forgetReducers()` empties the registry.
+
+### Writing one
+
+```php
+use Jambura\LLM\Prompt;
+use Jambura\LLM\PromptRejected;
+use Jambura\LLM\Reducer;
+
+class DropStaleConversation implements Reducer
+{
+    public function types(): array
+    {
+        return ['receipt', 'invoice'];      // [] runs for every prompt
+    }
+
+    public function reduce(Prompt $prompt): Prompt
+    {
+        $prompt->removeContext('conversation');
+
+        if (!$prompt->getContext()) {
+            throw new PromptRejected('no document to read the total off');
+        }
+
+        return $prompt;
+    }
+}
+```
+
+**The prompt is already a copy**, so changing it in place is safe and never reaches the
+object the caller passed to `prompt()`. Return that same prompt, or a new one built with
+`Prompt::create()`; whichever is returned is handed to the next reducer.
+
+That copy is a `clone`, so an object stored with `setOption()` is shared with the
+caller's prompt rather than copied. Treat option objects as read-only in a reducer, as
+pipeline steps already must.
+
+### Routing by type
+
+A reducer's `types()` says which prompts it applies to:
+
+| `types()` returns | Runs for |
+|---|---|
+| `[]` | every prompt, including one with no type |
+| `['receipt']` | prompts whose `setType()` was `'receipt'` |
+| `['receipt', 'invoice']` | either of them |
+
+A prompt whose type **nothing is registered for, or which has no type at all, passes
+through untouched**. A type nobody has written a reducer for yet is not an error, so
+adding a prompt type to an application doesn't mean registering a reducer for it first.
+
+### Refusing a prompt
+
+Throw `Jambura\LLM\PromptRejected` for a prompt that shouldn't reach a model at all.
+The reducers after it don't run, nothing is sent, and the exception reaches whoever
+called `prompt()`. It extends `LLMException`, so code that only cares that the call
+failed catches that as before:
+
+```php
+try {
+    $reply = LLM::use(AIModel\Claude::class)->prompt($prompt);
+} catch (PromptRejected $e) {
+    Log::info("{$e->reducer()} refused it: {$e->getMessage()}");   // the class that threw
+}
+```
+
+`reducer()` is filled in as the exception passes the pipeline, so a reducer throws with
+a reason and never has to name itself.
+
+A reducer trims noise; it may not return a prompt with **no task left**. That throws
+`LLMException` naming the reducer, rather than surfacing much later as an empty task in
+the formatted prompt.
+
+### The built-in reducer
+
+`Jambura\LLM\ContextFilter` keeps only the context sections a kind of prompt has a use
+for. It takes a map of prompt type to the sections that type keeps:
+
+```php
+new ContextFilter([
+    'receipt'        => ['static', 'retrieved'],
+    'voyage-summary' => ['retrieved', 'dynamic'],
+    'greeting'       => [],                        // no context at all
+]);
+```
+
+A `receipt` prompt then reaches the model without the conversation history it was never
+going to use. Types the map doesn't name are left alone, and a mistyped section name
+throws when the filter is built, which is normally registration time.
+
+`Prompt::removeContext('conversation', 'dynamic')` is what it uses, and is there for
+reducers of your own. It is the counterpart to `addContext()`, empties the sections it
+names, and emptying one that already holds nothing is not an error. Dropping *individual*
+context items, rather than whole sections, is not supported yet — context items are plain
+strings with nothing to filter them on.
+
 ## LLM pipelines
 
 `Jambura\LLM\Pipeline` puts a job's steps in order and runs them over one shared
