@@ -20,8 +20,8 @@ namespace Jambura\Mvc;
  * nothing: an action is a tool only when it is named here, because the
  * alternative is handing a model every destructive action an application has.
  *
- * What this implements: `tools/list`, `tools/call` and `ping`, answered as a
- * single JSON object per POST. What it does not: SSE streaming, subscriptions
+ * What this implements: `server/discover`, `tools/list`, `tools/call` and
+ * `ping`, answered as a single JSON object per POST. What it does not: SSE streaming, subscriptions
  * and list-changed notifications, multi round-trip input requests, pagination,
  * resources, prompts, elicitation, the stdio transport, and the pre-2026
  * `initialize` handshake. A client asking for an older protocol version is told
@@ -72,6 +72,12 @@ class Mcp
     private static array $serverInfo = ['name' => 'jambura', 'version' => '1.0'];
 
     /**
+     * Guidance for a model on how to use this server, sent by server/discover.
+     * @var string|null
+     */
+    private static ?string $instructions = null;
+
+    /**
      * Origins allowed to reach the endpoint, or null to accept any.
      * @var string[]|null
      */
@@ -90,11 +96,16 @@ class Mcp
      * a local MCP endpoint through DNS rebinding. Leave it null for a server
      * that is only reachable server-side.
      *
-     * @param array<string, string> $serverInfo 'name' and 'version'
+     * @param array<string, string> $serverInfo 'name' and 'version', and
+     *                                          optionally 'instructions': guidance
+     *                                          server/discover passes to a model
+     *                                          on how to use this server
      * @param string[]|null         $allowedOrigins exact Origin header values
      */
     public static function describe(array $serverInfo, ?array $allowedOrigins = null): void
     {
+        self::$instructions = $serverInfo['instructions'] ?? self::$instructions;
+        unset($serverInfo['instructions']);
         self::$serverInfo = $serverInfo + self::$serverInfo;
         self::$origins = $allowedOrigins;
     }
@@ -161,6 +172,7 @@ class Mcp
         self::$tools = [];
         self::$origins = null;
         self::$dispatcher = null;
+        self::$instructions = null;
         self::$serverInfo = ['name' => 'jambura', 'version' => '1.0'];
     }
 
@@ -228,6 +240,8 @@ class Mcp
         }
 
         switch ($method) {
+            case 'server/discover':
+                return self::http(200, self::resultBody($id, self::discovery()));
             case 'ping':
                 return self::http(200, self::resultBody($id, []));
             case 'tools/list':
@@ -295,8 +309,8 @@ class Mcp
             return self::http(400, self::errorBody(
                 $id,
                 self::UNSUPPORTED_PROTOCOL_VERSION,
-                "Unsupported protocol version: $version",
-                ['supported' => self::SUPPORTED_VERSIONS]
+                'Unsupported protocol version',
+                ['supported' => self::SUPPORTED_VERSIONS, 'requested' => $version]
             ));
         }
 
@@ -348,6 +362,31 @@ class Mcp
             ));
         }
         return null;
+    }
+
+    /**
+     * What this server supports, for server/discover.
+     *
+     * A client may call it before anything else to learn the protocol versions
+     * and capabilities in one request, and on stdio it is how a client tells a
+     * server of this era from one that still expects an initialize handshake.
+     * It is also the only place a server declares its capabilities, now that
+     * there is no handshake to declare them in.
+     *
+     * The capability values are objects rather than arrays so that they encode
+     * as `{}`: `tools` is declared with no settings, since this layer supports
+     * neither list-change notifications nor any extension.
+     */
+    private static function discovery(): array
+    {
+        $discovery = [
+            'supportedVersions' => self::SUPPORTED_VERSIONS,
+            'capabilities' => ['tools' => new \stdClass()],
+        ];
+        if (self::$instructions !== null) {
+            $discovery['instructions'] = self::$instructions;
+        }
+        return $discovery;
     }
 
     /**

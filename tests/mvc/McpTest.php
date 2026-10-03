@@ -102,7 +102,10 @@ class McpTest extends TestCase
 
         $this->assertSame(400, $answer['status']);
         $this->assertSame(Mcp::UNSUPPORTED_PROTOCOL_VERSION, $answer['body']['error']['code']);
-        $this->assertSame(['supported' => [Mcp::PROTOCOL_VERSION]], $answer['body']['error']['data']);
+        $this->assertSame(
+            ['supported' => [Mcp::PROTOCOL_VERSION], 'requested' => '2025-11-25'],
+            $answer['body']['error']['data']
+        );
     }
 
     public function testTheMethodHeaderMustMatchTheBody(): void
@@ -172,6 +175,38 @@ class McpTest extends TestCase
 
         $this->assertSame(404, $answer['status']);
         $this->assertSame(Mcp::METHOD_NOT_FOUND, $answer['body']['error']['code']);
+    }
+
+    public function testDiscoverReportsVersionsCapabilitiesAndIdentity(): void
+    {
+        Mcp::describe([
+            'name' => 'ag-ai',
+            'version' => '1.0',
+            'instructions' => 'Ask about indexed documents.',
+        ]);
+
+        $answer = Mcp::respond($this->request('server/discover'));
+        $result = $answer['body']['result'];
+
+        $this->assertSame(200, $answer['status']);
+        $this->assertSame('complete', $result['resultType']);
+        $this->assertSame([Mcp::PROTOCOL_VERSION], $result['supportedVersions']);
+        $this->assertSame('Ask about indexed documents.', $result['instructions']);
+        $this->assertSame(['name' => 'ag-ai', 'version' => '1.0'], $result['_meta'][Mcp::META_SERVER_INFO]);
+
+        // capabilities must encode as objects, not as empty arrays
+        $this->assertStringContainsString(
+            '"capabilities":{"tools":{}}',
+            json_encode($answer['body'])
+        );
+    }
+
+    public function testDiscoverSaysNothingAboutInstructionsWhenNoneWereGiven(): void
+    {
+        $this->assertArrayNotHasKey(
+            'instructions',
+            Mcp::respond($this->request('server/discover'))['body']['result']
+        );
     }
 
     public function testPingAnswersWithTheServerName(): void

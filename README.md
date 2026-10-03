@@ -478,8 +478,21 @@ unknown tool or a malformed envelope is a protocol error.
 
 ### What is implemented
 
-Revision **2026-07-28** over Streamable HTTP: `tools/list`, `tools/call` and `ping`,
-answered as one JSON object per POST.
+Revision **2026-07-28** over Streamable HTTP: `server/discover`, `tools/list`, `tools/call`
+and `ping`, answered as one JSON object per POST.
+
+`server/discover` is how a client learns the protocol versions and capabilities in one
+request, and it is the only place a server declares its capabilities now that there is no
+handshake to declare them in. Pass `instructions` to `describe()` to tell a model how to use
+the server:
+
+```php
+Mcp::describe([
+    'name' => 'ag-ai',
+    'version' => '1.0',
+    'instructions' => 'Ask about indexed documents; search before answering.',
+]);
+```
 
 | | |
 |---|---|
