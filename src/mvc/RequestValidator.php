@@ -282,6 +282,56 @@ class RequestValidator
     }
 
     /**
+     * The schema links as one JSON Schema object.
+     *
+     * Every schema() on this validator merged, in the order they were added, and
+     * translated by Validator::jsonSchema(). A validator with no schema
+     * describes a tool that takes no arguments.
+     *
+     * @return array a JSON Schema object, dialect 2020-12
+     */
+    public function jsonSchema(): array
+    {
+        $rules = [];
+        foreach ($this->links as [$kind, $argument]) {
+            if ($kind === self::SCHEMA) {
+                $rules = array_merge($rules, $argument);
+            }
+        }
+        return Validator::jsonSchema($rules);
+    }
+
+    /**
+     * The methods method() requires, or an empty array when it was never called.
+     *
+     * @return string[]
+     */
+    public function requiredMethods(): array
+    {
+        foreach ($this->links as [$kind, $argument]) {
+            if ($kind === self::METHOD) {
+                return $argument;
+            }
+        }
+        return [];
+    }
+
+    /**
+     * The roles roles() requires, or an empty array when it was never called.
+     *
+     * @return string[]
+     */
+    public function requiredRoles(): array
+    {
+        foreach ($this->links as [$kind, $argument]) {
+            if ($kind === self::ROLES) {
+                return $argument;
+            }
+        }
+        return [];
+    }
+
+    /**
      * Records a link, and checks it now when there is a request.
      *
      * @return $this

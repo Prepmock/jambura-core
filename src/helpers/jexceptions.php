@@ -5,6 +5,15 @@ class jamexBadController extends jamexPageNotFound {};
 class jamexBadAction extends jamexPageNotFound {};
 
 /**
+ * Thrown by a REST controller in capture mode when it would have sent a
+ * response and exited. Control flow, not a failure: the response is waiting on
+ * the controller.
+ */
+class jamexResponseReady extends jamex
+{
+}
+
+/**
  * A request that failed validation, thrown where there is no JSON response to
  * send. A Rest controller answers with the status instead of throwing.
  */

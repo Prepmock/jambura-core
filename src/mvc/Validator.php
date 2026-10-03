@@ -125,6 +125,153 @@ class Validator
     }
 
     /**
+     * Turns a set of rules into a JSON Schema object.
+     *
+     * The same rules that check a request describe it, which is what lets an
+     * action be published as an MCP tool without declaring its shape twice.
+     * Only what JSON Schema can express is translated:
+     *
+     * | Rule                      | Becomes                                   |
+     * |---------------------------|-------------------------------------------|
+     * | required                  | the field listed in `required`             |
+     * | int, number, bool         | type integer, number, boolean              |
+     * | email                     | type string, format email                  |
+     * | in                        | enum, with the type when the values agree  |
+     * | min, max, between         | minimum / maximum                          |
+     * | length                    | type string, minLength / maxLength         |
+     * | regex                     | pattern, and its message as a description  |
+     *
+     * A `function` rule has no schema equivalent and is left out; it still runs
+     * when the request is checked. A field with no type rule is described as a
+     * string, since that is how a value arrives in a query string or a form
+     * body. `additionalProperties` is false, matching validated(), which keeps
+     * only the fields the rules named.
+     *
+     * @param array<string, mixed> $rules field name => rules
+     * @return array a JSON Schema object, dialect 2020-12
+     */
+    public static function jsonSchema(array $rules): array
+    {
+        $properties = [];
+        $required = [];
+
+        foreach ($rules as $field => $fieldRules) {
+            $property = [];
+            foreach (self::normalize($fieldRules) as $rule) {
+                $args = array_slice($rule, 1);
+                switch ($rule[0]) {
+                    case 'required':
+                        $required[] = $field;
+                        break;
+                    case 'int':
+                        $property['type'] = 'integer';
+                        break;
+                    case 'number':
+                        $property['type'] = 'number';
+                        break;
+                    case 'bool':
+                        $property['type'] = 'boolean';
+                        break;
+                    case 'email':
+                        $property['type'] = 'string';
+                        $property['format'] = 'email';
+                        break;
+                    case 'in':
+                        $allowed = array_values(is_array($args[0] ?? null) ? $args[0] : $args);
+                        $property['enum'] = $allowed;
+                        $type = self::enumType($allowed);
+                        if ($type !== null) {
+                            $property['type'] = $type;
+                        }
+                        break;
+                    case 'min':
+                        $property['minimum'] = $args[0];
+                        break;
+                    case 'max':
+                        $property['maximum'] = $args[0];
+                        break;
+                    case 'between':
+                        $property['minimum'] = $args[0];
+                        $property['maximum'] = $args[1];
+                        break;
+                    case 'length':
+                        $property['type'] = 'string';
+                        $property['minLength'] = $args[0];
+                        if (isset($args[1])) {
+                            $property['maxLength'] = $args[1];
+                        }
+                        break;
+                    case 'regex':
+                        $pattern = self::ecmaPattern($args[0]);
+                        if ($pattern !== null) {
+                            $property['pattern'] = $pattern;
+                        }
+                        if (isset($args[1])) {
+                            $property['description'] = $args[1];
+                        }
+                        break;
+                }
+            }
+            $property['type'] ??= 'string';
+            $properties[$field] = $property;
+        }
+
+        $schema = ['type' => 'object', 'properties' => $properties, 'additionalProperties' => false];
+        if ($required) {
+            $schema['required'] = $required;
+        }
+        return $schema;
+    }
+
+    /**
+     * The JSON Schema type every value of an enum shares, or null when they differ.
+     *
+     * @param array $values
+     */
+    private static function enumType(array $values): ?string
+    {
+        $types = [];
+        foreach ($values as $value) {
+            if (is_bool($value)) {
+                $types['boolean'] = true;
+            } elseif (is_int($value)) {
+                $types['integer'] = true;
+            } elseif (is_float($value)) {
+                $types['number'] = true;
+            } elseif (is_string($value)) {
+                $types['string'] = true;
+            } else {
+                return null;
+            }
+        }
+        return count($types) === 1 ? array_key_first($types) : null;
+    }
+
+    /**
+     * Turns a PCRE pattern into one JSON Schema can use, or null when it cannot.
+     *
+     * JSON Schema patterns are ECMA-262: no delimiters and no flags. The
+     * delimiters are stripped here, and a pattern carrying flags is refused
+     * rather than mistranslated - /x/i would silently become case-sensitive,
+     * which is worse than advertising no pattern at all. The rule still runs
+     * when the request is checked either way.
+     */
+    private static function ecmaPattern(string $pattern): ?string
+    {
+        if (strlen($pattern) < 2) {
+            return null;
+        }
+        $open = $pattern[0];
+        $close = ['(' => ')', '[' => ']', '{' => '}', '<' => '>'][$open] ?? $open;
+        $end = strrpos($pattern, $close);
+        if ($end === false || $end === 0) {
+            return null;
+        }
+        // Anything after the closing delimiter is flags, which have no equivalent.
+        return substr($pattern, $end + 1) === '' ? substr($pattern, 1, $end - 1) : null;
+    }
+
+    /**
      * Runs every field's rules, collecting errors rather than stopping at the first.
      */
     private function check(): void

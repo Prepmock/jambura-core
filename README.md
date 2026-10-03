@@ -418,6 +418,129 @@ A plain controller has no JSON to send, so the failure throws `jamexRequestInval
 `status()` and `fields()` your error page can render. So does a `Request` built by hand,
 which is what makes the whole thing testable without a web server.
 
+## MCP: serving actions as tools
+
+`Jambura\Mvc\Mcp` publishes actions an application already has as
+[MCP](https://modelcontextprotocol.io) tools, so a model can call them with the same
+validation, the same roles and the same schema as an HTTP caller. The validator spec from
+[Requests and validation](#requests-and-validation) is the tool's `inputSchema` — a tool is
+never described twice.
+
+```php
+// index.php
+use Jambura\Mvc\Mcp;
+
+Mcp::describe(['name' => 'ag-ai', 'version' => '1.0'], ['https://app.example']);
+
+Mcp::tool(
+    'books.create',                        // the name a model calls
+    'Add a book to the catalogue',         // what a model reads when choosing a tool
+    'books',                               // controller
+    'create',                              // action, without action_
+    BookRequests::create(),                // the spec: schema, method and roles
+    'Create book'                          // optional title for a UI
+);
+```
+
+```php
+// app/controllers/mcp.php - the endpoint
+class Controller_mcp extends Jambura\Mvc\Rest
+{
+    protected function authenticate()
+    {
+        return true;                       // the tools' own roles do the gating
+    }
+
+    public function action_index()
+    {
+        Jambura\Mvc\Mcp::serve($this->request());   // sends the answer and exits
+    }
+}
+```
+
+**Registration is deliberate.** Enabling the endpoint publishes nothing: an action becomes
+a tool only where `tool()` names it. Anything else would hand a model every destructive
+action the application has.
+
+**A call runs the real action.** The tool's arguments become the request body, the method
+comes from the spec's `method()`, and the caller's `Authorization` header is carried
+through, so the roles resolver sees the same caller it would over HTTP. The action's
+`$this->response` comes back as the tool's `structuredContent`, with the JSON also in a
+text block.
+
+**Roles filter the list, not just the call.** A caller is never shown a tool their roles
+would refuse, and calling one they cannot see answers "unknown tool" rather than confirming
+it exists.
+
+**Two error channels, which is the point.** A validation failure is a *tool error* —
+`isError` with the field messages — so a model can correct itself and retry. Only an
+unknown tool or a malformed envelope is a protocol error.
+
+### What is implemented
+
+Revision **2026-07-28** over Streamable HTTP: `server/discover`, `tools/list`, `tools/call`
+and `ping`, answered as one JSON object per POST.
+
+`server/discover` is how a client learns the protocol versions and capabilities in one
+request, and it is the only place a server declares its capabilities now that there is no
+handshake to declare them in. Pass `instructions` to `describe()` to tell a model how to use
+the server:
+
+```php
+Mcp::describe([
+    'name' => 'ag-ai',
+    'version' => '1.0',
+    'instructions' => 'Ask about indexed documents; search before answering.',
+]);
+```
+
+| | |
+|---|---|
+| Transport | POST only; GET and DELETE answer `405`. A notification answers `202` with no body |
+| Stateless | no `initialize`, no sessions. Every request carries `_meta` with its protocol version and client capabilities; a request missing either gets `-32602` |
+| Mirrored headers | `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` on a call, each checked against the body. A mismatch is `400` with `-32020`; a Base64 `=?base64?…?=` name is decoded first |
+| Versions | an unsupported version is `400` with `-32022` naming what this server speaks |
+| Unknown method | `404` with `-32601` |
+| Origin | checked against the allowlist `describe()` was given, `403` otherwise, which is what stops DNS rebinding reaching a local endpoint |
+
+### What is not
+
+SSE streaming, `subscriptions/listen` and list-changed notifications, multi round-trip
+input requests, pagination, `resources/*`, `prompts/*`, elicitation, the stdio transport,
+`outputSchema`, and the pre-2026 `initialize` handshake. A client asking for an older
+revision is told which ones this server speaks rather than guessed at.
+
+### Schemas
+
+`Validator::jsonSchema()` translates what JSON Schema can express:
+
+| Rule | Becomes |
+|---|---|
+| `required` | the field in `required` |
+| `int`, `number`, `bool` | `type` integer, number, boolean |
+| `email` | `type` string with `format: email` |
+| `in` | `enum`, plus the type when the values agree |
+| `min`, `max`, `between` | `minimum` / `maximum` |
+| `length` | `type` string with `minLength` / `maxLength` |
+| `regex` | `pattern`, delimiters stripped, and the rule's message as the property's `description` |
+
+A field with no type rule is described as a string, since that is how a value arrives in a
+query string or a form body. `additionalProperties` is `false`, matching `validated()`.
+
+Two rules have no schema equivalent and are **not advertised**: `function` rules and
+`check()`s. They still run on every call. A `regex` carrying flags is left out as well,
+because JSON Schema patterns are ECMA-262 — `/x/i` would silently become case-sensitive,
+which is worse than advertising no pattern.
+
+### Capture mode
+
+A REST controller sends its response and exits, so nothing in the process can read what it
+answered. `Rest::captureNext($request)` makes the next controller answer that request and
+collect its response instead: `sendResponse()` stores it, `sendError()` raises
+`jamexResponseReady` rather than exiting, and `capturedResponse()` hands back the status and
+payload. `Mcp` uses it to run a tool call, and it is what makes a controller's REST
+responses testable at all.
+
 ## Models
 
 A model wraps one table. It is named `Model_{name}`, lives where your autoloader finds
