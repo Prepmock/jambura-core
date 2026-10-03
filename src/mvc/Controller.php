@@ -133,6 +133,20 @@ class Controller
     }
 
     /**
+     * Answers this request instead of the one in the superglobals.
+     *
+     * For the MCP layer, which runs an action against a request it built from a
+     * tool call, and for tests that run an action without a web server.
+     *
+     * @return $this
+     */
+    public function withRequest(Request $request)
+    {
+        $this->request = $request;
+        return $this;
+    }
+
+    /**
      * The request being answered, or one value out of $_REQUEST.
      *
      * Called with no argument it returns the Jambura\Mvc\Request for this
