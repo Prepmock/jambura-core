@@ -132,5 +132,62 @@ class PromptTest extends TestCase
 
         $this->assertSame([], $prompt->getDocuments());
         $this->assertSame([], $prompt->getOptions());
+        $this->assertSame([], $prompt->getTurns());
+    }
+
+    public function testTurnsAreKeptInTheOrderTheyWereSpoken(): void
+    {
+        $prompt = Prompt::create()
+            ->addTurn(Prompt::USER, 'What is my leave balance?')
+            ->addTurn(Prompt::ASSISTANT, 'You have 12 days.')
+            ->addTurn(Prompt::USER, 'And carried over?');
+
+        $this->assertSame([
+            ['role' => 'user', 'text' => 'What is my leave balance?'],
+            ['role' => 'assistant', 'text' => 'You have 12 days.'],
+            ['role' => 'user', 'text' => 'And carried over?'],
+        ], $prompt->getTurns());
+    }
+
+    /**
+     * Turns are not context. A prompt carrying a conversation still renders an
+     * empty context section, so a reducer or an adapter reading one does not
+     * find the other.
+     */
+    public function testTurnsAreNotContext(): void
+    {
+        $prompt = Prompt::create()->addTurn(Prompt::USER, 'Hello');
+
+        $this->assertSame([], $prompt->getContext());
+    }
+
+    public function testClearTurnsDropsEveryTurnAndNothingElse(): void
+    {
+        $prompt = Prompt::create()
+            ->setTask('Summarize')
+            ->addContext('conversation', 'Discussed last quarter')
+            ->addTurn(Prompt::USER, 'Hello');
+
+        $this->assertSame([], $prompt->clearTurns()->getTurns());
+        $this->assertSame(['conversation' => ['Discussed last quarter']], $prompt->getContext());
+        $this->assertSame('Summarize', $prompt->getTask());
+    }
+
+    public function testATurnNeedsAKnownRole(): void
+    {
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage("Unknown turn role 'system'. Use one of: user, assistant");
+        Prompt::create()->addTurn('system', 'You are an analyst');
+    }
+
+    /**
+     * The role is checked; the text is not. An empty reply is a thing a model
+     * can do, and refusing it here would throw after the call already succeeded.
+     */
+    public function testATurnAcceptsEmptyText(): void
+    {
+        $prompt = Prompt::create()->addTurn(Prompt::ASSISTANT, '');
+
+        $this->assertSame([['role' => 'assistant', 'text' => '']], $prompt->getTurns());
     }
 }

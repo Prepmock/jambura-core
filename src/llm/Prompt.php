@@ -16,6 +16,18 @@ class Prompt
     const CONTEXT_SECTIONS = ['static', 'retrieved', 'dynamic', 'conversation'];
 
     /**
+     * Roles a turn can be spoken by. The caller asks as USER, the model answers
+     * as ASSISTANT; there is no system role, because that is what setRole() is.
+     */
+    const USER = 'user';
+    const ASSISTANT = 'assistant';
+
+    /**
+     * Every role addTurn() accepts.
+     */
+    const ROLES = [self::USER, self::ASSISTANT];
+
+    /**
      * What kind of prompt this is, for routing before it reaches a model.
      * Adapters do not send it.
      * @var string|null
@@ -45,6 +57,19 @@ class Prompt
      * @var string|null
      */
     private ?string $task = null;
+
+    /**
+     * What has already been said, oldest first.
+     *
+     * Kept apart from the context sections because an adapter over a chat API
+     * wants these as real messages with roles, not as prose: send() receives the
+     * Prompt, so it can read getTurns() and map them onto whatever its API calls
+     * a message list. For adapters that do not, handlePrompt() renders them into
+     * the `conversation` context section instead, so nothing is lost.
+     *
+     * @var list<array{role: string, text: string}>
+     */
+    private array $turns = [];
 
     /**
      * Files the model should read.
@@ -131,6 +156,48 @@ class Prompt
     }
 
     /**
+     * Appends a turn to the conversation.
+     *
+     * Turns are appended in the order they were spoken, oldest first:
+     *
+     *     $prompt->addTurn(Prompt::USER, 'What is my leave balance?')
+     *            ->addTurn(Prompt::ASSISTANT, 'You have 12 days.');
+     *
+     * The role is checked because it is one of two fixed values and a typo would
+     * otherwise reach the model as a role it does not know. The text is not: it
+     * is data, and an empty reply is the adapter's to refuse, not this object's.
+     *
+     * LLM::chat() calls this for you. Call it by hand to give a one-shot
+     * prompt() some history without storing any.
+     *
+     * @param string $role one of ROLES
+     *
+     * @throws LLMException if the role is not one of ROLES
+     */
+    public function addTurn(string $role, string $text): static
+    {
+        if (!in_array($role, self::ROLES, true)) {
+            throw new LLMException(
+                "Unknown turn role '$role'. Use one of: " . implode(', ', self::ROLES)
+            );
+        }
+        $this->turns[] = ['role' => $role, 'text' => $text];
+        return $this;
+    }
+
+    /**
+     * Drops every turn.
+     *
+     * The counterpart to addTurn(), and how LLM::chat() puts a stored history in
+     * front of turns the caller added by hand rather than behind them.
+     */
+    public function clearTurns(): static
+    {
+        $this->turns = [];
+        return $this;
+    }
+
+    /**
      * Adds a file for the model to read.
      *
      * The path is kept as given and nothing is opened here — a prompt should be
@@ -199,6 +266,16 @@ class Prompt
     public function getTask(): ?string
     {
         return $this->task;
+    }
+
+    /**
+     * What has already been said, oldest first.
+     *
+     * @return list<array{role: string, text: string}>
+     */
+    public function getTurns(): array
+    {
+        return $this->turns;
     }
 
     /**
