@@ -18,6 +18,17 @@ namespace Jambura\LLM;
  *     // a controller, a command, a queue job
  *     $answer = Agent::use('researcher')->ask('What changed in the shipping rules?');
  *
+ *     // or hand it a prompt with context already gathered
+ *     $answer = Agent::use('researcher')->run($prompt);
+ *
+ *     // or keep the whole Run, for its trace and status
+ *     $run = Agent::use('researcher')->start('What changed in the shipping rules?');
+ *
+ * This version is single-shot: a call builds a Prompt from the definition and
+ * the task, sends it through the adapter once with LLM::prompt(), and the reply
+ * is the answer. Tool calling and the step loop arrive once adapters can return
+ * tool calls.
+ *
  * The definition is shared and a run is not. Agent::use() hands back the one
  * definition every caller shares, so an Agent holds configuration only and
  * nothing about an execution. Everything that belongs to one execution - the
@@ -28,9 +39,11 @@ namespace Jambura\LLM;
  * review and deploy like the rest of the application.
  *
  * Errors are `Jambura\LLM\LLMException`, and every one of them is a mistake in
- * the definition or the call, raised where the agent is defined: an unknown
- * agent, a name used twice, a model class that is not an adapter, or a setting
- * the agent does not know.
+ * the definition or the call. Definition mistakes fail where the agent is
+ * defined: a name used twice, a model class that is not an adapter, or a
+ * setting the agent does not know. Call mistakes fail at the call: an unknown
+ * agent, or a call before model() was chosen. An exception from the adapter
+ * itself is rethrown as it is, after the call's run is marked failed.
  */
 class Agent
 {
@@ -276,5 +289,107 @@ class Agent
     public function definedTools(): array
     {
         return $this->tools;
+    }
+
+    /**
+     * Asks the agent to do a task and returns its answer.
+     *
+     * The prompt sent is the agent's role and instructions with $task as the
+     * task. Use start() instead to keep the Run, with its trace and status.
+     *
+     * @param string $task what the agent is asked to do
+     * @return string the model's reply
+     *
+     * @throws LLMException if no model() was chosen, or the task is blank
+     * @throws \Throwable   whatever the adapter throws, after the run is marked
+     *                      failed
+     */
+    public function ask(string $task): string
+    {
+        return $this->start($task)->answer();
+    }
+
+    /**
+     * Asks the agent to do a task and returns the finished Run.
+     *
+     * The same call as ask(), for a caller that wants more than the answer: the
+     * run's id, the prompt that was sent, its turns and its trace. Every call
+     * returns a new Run; nothing about it is kept on the agent.
+     *
+     * @param string $task what the agent is asked to do
+     * @return Run the run, done, with the reply as its answer()
+     *
+     * @throws LLMException if no model() was chosen, or the task is blank
+     * @throws \Throwable   whatever the adapter throws, after the run is marked
+     *                      failed
+     */
+    public function start(string $task): Run
+    {
+        return $this->execute($this->withDefinition(Prompt::create()->setTask($task)));
+    }
+
+    /**
+     * Sends a prompt the caller built, with context already gathered, and
+     * returns the answer.
+     *
+     * The prompt is copied first, as Pipeline::feed() does, so the object the
+     * caller passed in is left as it was. The copy takes the agent's role when
+     * it has none of its own, and the agent's instructions after its own; its
+     * context, task, documents and options are sent as they are.
+     *
+     * @param Prompt $prompt the prompt to send, with a task
+     * @return string the model's reply
+     *
+     * @throws LLMException if no model() was chosen, or the prompt has no task
+     * @throws \Throwable   whatever the adapter throws, after the run is marked
+     *                      failed
+     */
+    public function run(Prompt $prompt): string
+    {
+        return $this->execute($this->withDefinition(clone $prompt))->answer();
+    }
+
+    /**
+     * Adds the agent's role and instructions to a prompt the agent owns.
+     *
+     * A role already on the prompt is kept, so a caller's role wins over the
+     * agent's.
+     */
+    private function withDefinition(Prompt $prompt): Prompt
+    {
+        if ($this->role !== null && $prompt->getRole() === null) {
+            $prompt->setRole($this->role);
+        }
+        return $prompt->addInstruction(...$this->instructions);
+    }
+
+    /**
+     * Sends a prompt through the agent's adapter as a new Run, and returns the
+     * run once it is done.
+     *
+     * The Run is created here and handed back, never stored on the agent, so
+     * two calls through the same shared agent share nothing.
+     *
+     * @throws LLMException if no model() was chosen
+     * @throws \Throwable   whatever the adapter throws, after the run is marked
+     *                      failed
+     */
+    private function execute(Prompt $prompt): Run
+    {
+        if ($this->model === null) {
+            throw new LLMException("Agent '{$this->name}' has no model. Call model() first");
+        }
+
+        $run = new Run($this->name, $prompt);
+        $run->markRunning();
+        try {
+            $reply = \Jambura\LLM::use($this->model)->prompt($run->prompt());
+        } catch (\Throwable $e) {
+            $run->markFailed($e);
+            throw $e;
+        }
+        $run->recordTurn($this->model, $reply);
+        $run->markDone($reply);
+        return $run;
     }
 }
