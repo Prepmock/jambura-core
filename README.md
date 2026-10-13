@@ -757,6 +757,121 @@ naming a step that was never registered. A gatekeeper stopping a run is not one 
 `feed()` returns the context with `wasStopped()` true, so the caller decides what that
 means.
 
+## LLM agents
+
+`Jambura\LLM\Agent` is a named agent: an adapter, a role and instructions, defined where the
+application boots and run from a controller, a command or a queue job.
+
+```php
+use Jambura\LLM\Agent;
+
+Agent::make('researcher')
+    ->model(AIModel\Claude::class)
+    ->role('You are a research assistant for mill operations.')
+    ->instructions('Cite the context you use.', 'Be brief.')
+    ->configure(['max_steps' => 6, 'token_budget' => 20000]);
+```
+
+```php
+$answer = Agent::use('researcher')->ask('What changed in the shipping rules?');
+```
+
+This version is single-shot. A call builds a `Prompt` from the definition and the task,
+sends it through the adapter once with `LLM::prompt()`, and the reply is the answer. Tool
+calling and the step loop come later, once adapters can return tool calls.
+
+**The definition.**
+
+| Method | Takes | Notes |
+|---|---|---|
+| `model()` | an adapter class | checked and registered with `Jambura\LLM` the way `Pipeline::model()` does it |
+| `role()` | who the model acts as | calling it again replaces the role |
+| `instructions()` | one or more instructions | calling it again appends, in order |
+| `configure()` | `max_steps`, `token_budget` | recorded for the step loop to enforce; any other name throws |
+| `tools()` | tool names | recorded, unused until the tool registry exists |
+
+**Three ways to call it.**
+
+```php
+// a task: role, instructions, then the task
+$answer = Agent::use('researcher')->ask('What changed in the shipping rules?');
+
+// the same call, but keep the whole Run
+$run = Agent::use('researcher')->start('What changed in the shipping rules?');
+
+// a prompt with context you gathered yourself
+$prompt = Prompt::create()
+    ->addContext('retrieved', $rulesV2)
+    ->setTask('What changed in the shipping rules?');
+
+$answer = Agent::use('researcher')->run($prompt);
+```
+
+`run()` copies the prompt first, as `feed()` does, so the object you passed stays as it was.
+The copy takes the agent's role only when it has no role of its own, and the agent's
+instructions after its own. Its context, task, documents and options are sent unchanged.
+
+**The definition is shared, a run is not.** `Agent::use()` returns the one definition
+every caller shares, so an agent holds configuration and nothing else. Each `ask()`,
+`start()` or `run()` creates a new `Jambura\LLM\Run`, and that run owns everything about the
+execution: the prompt it sent, its turns, its trace, the budget it spent and its status. Two
+calls through the same agent share nothing, and a later supervisor can nest runs inside a
+run without them leaking into each other.
+
+```php
+$run->id();       // 32 hex characters, generated for you
+$run->status();   // Run::PENDING, RUNNING, DONE or FAILED
+$run->answer();   // the reply, once done
+$run->prompt();   // the prompt that was sent
+$run->turns();    // each model call: step, adapter class, reply
+$run->trace();    // started, model_call, done or failed, each with its step and time
+$run->spent();    // ['steps' => 1, 'tokens' => 0]; tokens stay 0 until adapters report usage
+```
+
+If the adapter throws, the run is marked failed and the same exception reaches you.
+
+**Runs outlive the request; agents don't have to.** A PHP process ends with the request.
+Definitions are code, so they are rebuilt from bootstrap every time, and they diff, review
+and deploy like the rest of the application. What may have to survive is a run, so a run
+turns into a plain array and back, and a `Jambura\LLM\RunStore` keeps that array under the
+run's id:
+
+```php
+use Jambura\LLM\Run;
+
+$store->save($run->id(), $run->toArray());
+
+// a later request, or a worker
+$state = $store->load($runId);
+$run = $state === null ? null : Run::fromArray($state);
+```
+
+```php
+interface RunStore
+{
+    public function load(string $runId): ?array;
+    public function save(string $runId, array $state): void;
+    public function forget(string $runId): void;
+}
+```
+
+- **In-request.** One run, start to finish, inside the request. This is what agents do
+  today, and it needs no store.
+- **Resumable.** The run is saved after each step and resumed later by its id.
+- **Background.** A worker runs it, and the web request that started it polls for the
+  result. Anything multi-step needs this: six model calls at eight seconds each is past
+  `max_execution_time` and the usual fpm timeout.
+
+The framework ships `InMemoryRunStore` for tests, and no database or cache store yet. A store
+that saves JSON should encode with `JSON_PRESERVE_ZERO_FRACTION`, or a float option such as
+a temperature of `0.0` comes back as the integer `0`.
+
+**Errors.** Everything throws `Jambura\LLM\LLMException`. A mistake in the definition fails
+where the agent is defined: a name used twice, a model class that doesn't exist or isn't an
+adapter, or a setting other than `max_steps` and `token_budget`. A mistake in the call fails
+at the call: an agent that was never defined, a call before `model()`, or a blank task.
+`Run::fromArray()` throws on state with a missing part or an unknown status.
+
 ## Migrations
 
 `robmorgan/phinx` is installed with the framework, so `vendor/bin/phinx` is available
