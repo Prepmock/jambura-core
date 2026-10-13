@@ -29,10 +29,17 @@ namespace Jambura\LLM;
  *
  * Errors are `Jambura\LLM\LLMException`, and every one of them is a mistake in
  * the definition or the call, raised where the agent is defined: an unknown
- * agent, or a name used twice.
+ * agent, a name used twice, a model class that is not an adapter, or a setting
+ * the agent does not know.
  */
 class Agent
 {
+    /**
+     * Settings configure() accepts. They are recorded for the step loop to
+     * enforce once adapters can return tool calls.
+     */
+    const SETTINGS = ['max_steps', 'token_budget'];
+
     /**
      * Defined agents, keyed by name.
      * @var array<string, Agent>
@@ -44,6 +51,36 @@ class Agent
      * @var string
      */
     private string $name;
+
+    /**
+     * Adapter class the agent's prompts are sent through, as given to model().
+     * @var string|null
+     */
+    private ?string $model = null;
+
+    /**
+     * Who the model should act as, as given to role().
+     * @var string|null
+     */
+    private ?string $role = null;
+
+    /**
+     * Instructions every run's prompt carries, in the order they were given.
+     * @var string[]
+     */
+    private array $instructions = [];
+
+    /**
+     * Settings from configure(), keyed by name, see SETTINGS.
+     * @var array<string, mixed>
+     */
+    private array $settings = [];
+
+    /**
+     * Tool names from tools(), recorded for the tool registry to resolve.
+     * @var string[]
+     */
+    private array $tools = [];
 
     /**
      * Agents are created by make() and fetched by use().
@@ -117,5 +154,127 @@ class Agent
     public function name(): string
     {
         return $this->name;
+    }
+
+    /**
+     * Chooses the adapter this agent's prompts are sent through.
+     *
+     * The adapter is one of the framework's - a concrete subclass of
+     * Jambura\LLM - as Pipeline::model() takes, and it is registered with
+     * Jambura\LLM here, so an agent definition does not need a separate
+     * registerModels() call for it. Calling model() again replaces the adapter.
+     *
+     * @param string $adapter an adapter class name, for example
+     *                        \AIModel\Claude::class
+     * @return $this
+     *
+     * @throws LLMException if the class does not exist or is not a concrete
+     *                      Jambura\LLM adapter
+     */
+    public function model(string $adapter): static
+    {
+        if (!class_exists($adapter)) {
+            throw new LLMException("Agent '{$this->name}' names the adapter class $adapter, which does not exist");
+        }
+        if (!is_subclass_of($adapter, \Jambura\LLM::class)) {
+            throw new LLMException(
+                "Agent '{$this->name}' sends its prompts through a model, so $adapter must be an adapter extending "
+                . \Jambura\LLM::class
+            );
+        }
+        \Jambura\LLM::registerModels([$adapter]);
+
+        $this->model = $adapter;
+        return $this;
+    }
+
+    /**
+     * Sets who the model should act as.
+     *
+     * It becomes the role of every prompt this agent sends. Calling role()
+     * again replaces it.
+     *
+     * @return $this
+     */
+    public function role(string $role): static
+    {
+        $this->role = $role;
+        return $this;
+    }
+
+    /**
+     * Adds instructions every prompt this agent sends will carry.
+     *
+     * Calling instructions() again appends, the way Prompt::addInstruction()
+     * does, so the order they are given in is the order the model reads them.
+     *
+     * @return $this
+     */
+    public function instructions(string ...$instructions): static
+    {
+        array_push($this->instructions, ...$instructions);
+        return $this;
+    }
+
+    /**
+     * Adds settings that bound this agent's runs.
+     *
+     * Only the names in SETTINGS are accepted: max_steps and token_budget. They
+     * are recorded now for the step loop to enforce once it exists; a
+     * single-shot run makes one model call and does not read them yet. Calling
+     * configure() again merges, so a later call can override one setting
+     * without repeating the rest.
+     *
+     * @param array<string, mixed> $settings
+     * @return $this
+     *
+     * @throws LLMException if a setting is not one of SETTINGS
+     */
+    public function configure(array $settings): static
+    {
+        $unknown = array_diff(array_keys($settings), self::SETTINGS);
+        if ($unknown) {
+            throw new LLMException(
+                "Agent '{$this->name}' has no setting " . implode(', ', $unknown)
+                . '. Use one of: ' . implode(', ', self::SETTINGS)
+            );
+        }
+        $this->settings = array_merge($this->settings, $settings);
+        return $this;
+    }
+
+    /**
+     * The settings configure() has collected.
+     *
+     * @return array<string, mixed>
+     */
+    public function settings(): array
+    {
+        return $this->settings;
+    }
+
+    /**
+     * Names the tools this agent may call.
+     *
+     * The names are recorded and not yet used: tool calling arrives once
+     * adapters can return tool calls, and the tool registry will resolve these
+     * names then. Calling tools() again appends.
+     *
+     * @return $this
+     */
+    public function tools(string ...$tools): static
+    {
+        array_push($this->tools, ...$tools);
+        return $this;
+    }
+
+    /**
+     * The tool names tools() has recorded, in the order they were given.
+     *
+     * @return string[]
+     */
+    public function definedTools(): array
+    {
+        return $this->tools;
     }
 }
