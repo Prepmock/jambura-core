@@ -228,4 +228,72 @@ class Prompt
     {
         return $this->options;
     }
+
+    /**
+     * Every part of the prompt as a plain array, for storing and rebuilding with
+     * fromArray().
+     *
+     * Context keeps every section, empty ones included, so the shape is the
+     * same for every prompt. Options are copied as they were set, so a prompt
+     * whose options hold only scalars and arrays survives json_encode() too.
+     *
+     * @return array{type: string|null, role: string|null, context: array<string, string[]>,
+     *               instructions: string[], task: string|null,
+     *               documents: list<array{path: string, media_type: string|null}>,
+     *               options: array<string, mixed>}
+     */
+    public function toArray(): array
+    {
+        return [
+            'type' => $this->type,
+            'role' => $this->role,
+            'context' => $this->context,
+            'instructions' => $this->instructions,
+            'task' => $this->task,
+            'documents' => $this->documents,
+            'options' => $this->options,
+        ];
+    }
+
+    /**
+     * Rebuilds a prompt from what toArray() returned.
+     *
+     * Every part goes back in through the prompt's own setters, so an unknown
+     * context section or a blank document path fails here just as it would
+     * when the prompt was first built.
+     *
+     * @param array<string, mixed> $state the output of toArray()
+     *
+     * @throws LLMException if a part is missing, or a setter rejects a value
+     */
+    public static function fromArray(array $state): static
+    {
+        $keys = ['type', 'role', 'context', 'instructions', 'task', 'documents', 'options'];
+        $missing = array_diff($keys, array_keys($state));
+        if ($missing) {
+            throw new LLMException('Prompt state is missing: ' . implode(', ', $missing));
+        }
+
+        $prompt = new static();
+        if ($state['type'] !== null) {
+            $prompt->setType($state['type']);
+        }
+        if ($state['role'] !== null) {
+            $prompt->setRole($state['role']);
+        }
+        foreach ($state['context'] as $section => $items) {
+            $prompt->addContext($section, ...array_values($items));
+        }
+        $prompt->addInstruction(...array_values($state['instructions']));
+        if ($state['task'] !== null) {
+            $prompt->setTask($state['task']);
+        }
+        foreach ($state['documents'] as $document) {
+            $prompt->addDocument($document['path'], $document['media_type'] ?? null);
+        }
+        foreach ($state['options'] as $name => $value) {
+            $prompt->setOption($name, $value);
+        }
+        return $prompt;
+    }
 }

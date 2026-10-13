@@ -133,4 +133,55 @@ class PromptTest extends TestCase
         $this->assertSame([], $prompt->getDocuments());
         $this->assertSame([], $prompt->getOptions());
     }
+
+    public function testAPromptSurvivesToArrayAndFromArray(): void
+    {
+        $prompt = Prompt::create()
+            ->setType('summary')
+            ->setRole('Analyst')
+            ->addContext('conversation', 'User asked about ETAs')
+            ->addContext('static', 'Port rules', 'Berth list')
+            ->addInstruction('Be brief.', 'Cite sources.')
+            ->setTask('Summarize')
+            ->addDocument('/tmp/receipt.pdf', 'application/pdf')
+            ->addDocument('/tmp/scan.png')
+            ->setOption('temperature', 0.0)
+            ->setOption('stop_sequences', null);
+        $state = $prompt->toArray();
+
+        $copy = Prompt::fromArray($state);
+
+        $this->assertSame($state, $copy->toArray());
+        $this->assertSame($prompt->getContext(), $copy->getContext());
+        $this->assertSame($prompt->getDocuments(), $copy->getDocuments());
+        $this->assertSame($prompt->getOptions(), $copy->getOptions());
+    }
+
+    public function testAnEmptyPromptSurvivesTheRoundTrip(): void
+    {
+        $state = (new Prompt())->toArray();
+
+        $this->assertSame($state, Prompt::fromArray($state)->toArray());
+        $this->assertNull(Prompt::fromArray($state)->getTask());
+    }
+
+    public function testFromArrayRejectsAnUnknownContextSection(): void
+    {
+        $state = Prompt::create()->setTask('Summarize')->toArray();
+        $state['context']['history'] = ['x'];
+
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage("Unknown context section 'history'");
+        Prompt::fromArray($state);
+    }
+
+    public function testFromArrayWithAMissingPartThrows(): void
+    {
+        $state = Prompt::create()->setTask('Summarize')->toArray();
+        unset($state['documents']);
+
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage('Prompt state is missing: documents');
+        Prompt::fromArray($state);
+    }
 }
