@@ -8,24 +8,51 @@ class Router
 
     public function route($namespace = '')
     {
-        // ?? rather than a bare read: a missing key is a warning from PHP 8, and
-        // in DEV it prints before the redirect below, so the header never goes.
-        if ($controller = $_GET['controller'] ?? null) {
-            if (file_exists(JAMBURA_CONTROLLERS . $controller . '.php')) {
-                include(JAMBURA_CONTROLLERS . $controller . '.php');
-            } else {
-                // FIXME rather than throwing exception this should display a 
-                // default 404 page.
-                throw new \jamexBadController('Invalid controller file : ' . $controller);
-            }
+        // Route resolves; this method only dispatches. Segment validation lives
+        // there too, so nothing unchecked reaches the include() below.
+        $route = Route::fromRequest(Request::fromGlobals());
 
-            $this->action = isset($_GET['action']) ? 'action_' . $_GET['action'] : 'action_index';
-            $class = $namespace . 'Controller_' . $controller;
-            $this->controller = new $class();
-            return $this;
-        } else {
+        if ($route === null) {
             header('location:/' . DEFAULT_PAGE);
+            return;
         }
+
+        if (!$route->exists()) {
+            // FIXME rather than throwing exception this should display a
+            // default 404 page.
+            throw new \jamexBadController('Invalid controller file : ' . implode('/', $route->segments()));
+        }
+
+        include($route->file());
+
+        $this->action = $route->action();
+        $class = $this->classIn($route, $namespace);
+        $this->controller = new $class();
+        return $this;
+    }
+
+    /**
+     * The controller class the included file turned out to hold.
+     *
+     * api/ask.php is expected to hold Controller_api_ask, falling back to
+     * Controller_ask when it does not, so a controller that moves into a
+     * directory keeps working without being renamed. For a controller that is
+     * not nested the two names are the same, so nothing changes for one.
+     *
+     * No autoloading: the file has just been included, so the class is either
+     * there or the name is wrong.
+     */
+    private function classIn(Route $route, $namespace)
+    {
+        $class = $namespace . $route->className();
+        if (class_exists($class, false)) {
+            return $class;
+        }
+
+        $segments = $route->segments();
+        $fallback = $namespace . 'Controller_' . end($segments);
+
+        return class_exists($fallback, false) ? $fallback : $class;
     }
 
     public function display()
@@ -56,6 +83,10 @@ class Router
         }
 
         if (is_array($page)) {
+            // The failed request's `r` is still in $_GET, and `r` beats
+            // controller/action - without this the error page routes straight
+            // back to the controller that just threw.
+            unset($_GET['r']);
             $_GET['controller'] = $page[0];
             $_GET['action'] = $page[1];
 

@@ -35,11 +35,11 @@ data-structure classes, which are not autoloaded (see [Helpers](#helpers)).
 ## How a request flows
 
 ```
-index.php  →  Router::route()    reads ?controller=books&action=show
-           →  includes JAMBURA_CONTROLLERS/books.php
+index.php  →  Route::fromRequest()  reads ?r=books/show, or ?controller=books&action=show
+           →  Router::route()       includes JAMBURA_CONTROLLERS/books.php
            →  new Controller_books()     constructor sets up assets, cache, session, flash,
                                          then calls init()
-           →  Router::display()  calls action_show(), then end()
+           →  Router::display()     calls action_show(), then end()
 ```
 
 A missing `action` means `action_index`. An unknown controller file throws
@@ -93,12 +93,6 @@ ORM::configure('mysql:host=localhost;dbname=app;charset=utf8mb4');
 ORM::configure('username', 'app');
 ORM::configure('password', 'secret');
 
-// The controller name becomes part of an include() path, and the router does not
-// check it. Without this, ?controller=../../x includes a file from anywhere.
-if (isset($_GET['controller']) && !preg_match('/^[A-Za-z0-9_-]+$/', $_GET['controller'])) {
-    $_GET['controller'] = '';
-}
-
 try {
     // route() returns null after redirecting a request that names no controller.
     if ($router = (new Jambura\Mvc\Router())->route()) {
@@ -118,25 +112,75 @@ defining a constant twice raises a warning.
 
 ## Routing
 
-The router only reads `$_GET['controller']` and `$_GET['action']`. Clean URLs are a
-rewrite onto that form, for example in Apache:
+The router reads two forms, and `r` wins when both arrive:
+
+```
+index.php?r=books/show&id=7
+index.php?controller=books&action=show
+```
+
+Both run `Controller_books::action_show()`. A request that names no controller at all is
+redirected to `DEFAULT_PAGE`.
+
+Clean URLs are a rewrite onto the `r` form, which takes one rule in Apache:
 
 ```apache
 RewriteEngine On
 RewriteCond %{REQUEST_FILENAME} !-f
-RewriteRule ^([a-zA-Z0-9_-]+)/?$ index.php?controller=$1 [L,QSA]
-RewriteCond %{REQUEST_FILENAME} !-f
-RewriteRule ^([a-zA-Z0-9_-]+)/([a-zA-Z0-9_-]+)/?$ index.php?controller=$1&action=$2 [L,QSA]
+RewriteRule ^(.+)$ index.php?r=$1 [L,QSA]
 ```
 
 `/books` then runs `Controller_books::action_index()`, and `/books/show?id=7` runs
 `action_show()`.
+
+`QSA` is what keeps `?id=7`, and it also means a caller can append their own `r`:
+`/books?r=admin/post` arrives as `r=books&r=admin/post`, and PHP keeps the last one. The
+route is still validated, so this reaches no file it shouldn't, but the path in the URL
+bar is not the one that runs. Don't put path-based access rules in front of PHP and
+assume the router agrees with them.
+
+### Which segment is the action
+
+`r=api/ask` is ambiguous: `api` may be a directory holding `ask.php`, or a controller
+with an `ask` action. The router takes the **longest controller path that exists**, and
+whatever follows it is the action:
+
+| `?r=` | on disk | runs |
+|---|---|---|
+| `api/ask` | `api/ask.php` | `Controller_api_ask::action_index()` |
+| `api/ask` | `api.php` | `Controller_api::action_ask()` |
+| `books` | `books.php` | `Controller_books::action_index()` |
+| `api/books/show` | `api/books.php` | `Controller_api_books::action_show()` |
+
+So a fat `api.php` can be split into `api/ask.php` and `api/tell.php` without its URLs
+changing. The footgun is the other direction: if `api.php` has an `action_ask()` **and**
+`api/ask.php` exists, the file wins and the action becomes unreachable with no error. The
+router cannot warn about it — knowing the action is there would mean including the file
+before deciding whether to.
+
+Segments past the action are ignored: `r=books/show/7` is `action_show()`, and the `7` is
+dropped. Parameters travel in the query string.
+
+The `?controller=&action=` form is *not* resolved this way. It already says which segment
+is which, so it is taken at its word and a later `books/show.php` cannot move it.
+
+### Validation
+
+Every segment must match `[A-Za-z0-9_-]+`. Anything else — `..`, a slash-escape, a null
+byte, a trailing newline — throws `jamexBadController` before the name reaches
+`include()`. This is the framework's job now; an application needs no guard of its own,
+and one carried over from an earlier version can be deleted.
 
 ## Controllers
 
 A controller lives in `JAMBURA_CONTROLLERS/{name}.php`, is named `Controller_{name}`,
 and extends `Jambura\Mvc\Controller` (or its alias `jController`). Its actions are public
 `action_{name}()` methods.
+
+A controller may sit in a directory: `api/ask.php` is reached by `?r=api/ask` and holds
+`Controller_api_ask`. The old name still works — the router falls back to
+`Controller_ask` — so moving a controller into a directory does not force a rename. Name
+new ones for their full path.
 
 ```php
 <?php
@@ -783,11 +827,6 @@ signed foreign key points at an unsigned id. Turn both off in `phinx.php`:
   used to throw a `TypeError`.
 - If you have existing migrations, add the Phinx feature flags above.
 - `Model::each()` works again. It called PHP's removed `each()` and was fatal on PHP 8.
-
-## Known issues
-
-- `Router::route()` does not validate the controller name before including it. Sanitize
-  `$_GET['controller']` first, as the bootstrap example does.
 
 ## License
 
