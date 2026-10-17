@@ -196,7 +196,7 @@ queued with `addCSS()`.
 ## REST controllers
 
 Extend `Jambura\Mvc\Rest` and implement `authenticate()`, which is abstract. `init()`
-turns off the layout, records the request method, and calls `authenticate()`. A `false`
+messages off the layout, records the request method, and calls `authenticate()`. A `false`
 return, or an exception, answers `401` before any action runs.
 
 ```php
@@ -628,7 +628,7 @@ $reply = LLM::use(AIModel\Example::class)->prompt($prompt);
 ```
 
 - `registerModels()` checks each class straight away. A class that doesn't exist, doesn't
-  extend `Jambura\LLM`, is abstract, or has an invalid `$order` or `$keepTurns` throws
+  extend `Jambura\LLM`, is abstract, or has an invalid `$order` or `$keepMessages` throws
   `LLMException` at bootstrap, not on the first prompt.
 - `use()` builds an adapter the first time and returns that same instance after. Using a
   class that was never registered throws. `forgetModels()` empties the registry.
@@ -644,26 +644,26 @@ $reply = LLM::use(AIModel\Example::class)->prompt($prompt);
 `chat()` is the same call with history either side of it.
 
 ```php
-$reply = LLM::use(AIModel\Example::class)->chat($prompt, $sessionId);
+$reply = LLM::use(AIModel\Example::class)->chat($prompt, $threadId);
 ```
 
-That loads the turns stored under `$sessionId`, puts them on a copy of the prompt, calls
+That loads the messages stored under `$threadId`, puts them on a copy of the prompt, calls
 `prompt()`, then appends the question and the reply to the history. The adapter's
 `$format`, `$order` and `send()` are unchanged, and an adapter need not know `chat()`
 exists.
 
-A session id nothing has been stored under starts a new conversation, so there's no
+A thread id nothing has been stored under starts a new conversation, so there's no
 start-or-resume call to get wrong. The id is yours to choose: a user id, a chat row id, a
 uuid you hand the browser. A blank one throws `LLMException`.
 
-**Turns** are what a conversation is made of, and they live on the `Prompt`, apart from
+**Messages** are what a conversation is made of, and they live on the `Prompt`, apart from
 the context sections:
 
 ```php
-$prompt->addTurn(Prompt::USER, 'What is my leave balance?')
-       ->addTurn(Prompt::ASSISTANT, 'You have 12 days.');
+$prompt->addMessage(Prompt::USER, 'What is my leave balance?')
+       ->addMessage(Prompt::ASSISTANT, 'You have 12 days.');
 
-$prompt->getTurns();   // [['role' => 'user', 'text' => '...'], ...], oldest first
+$prompt->getMessages();   // [['role' => 'user', 'text' => '...'], ...], oldest first
 ```
 
 `chat()` adds these for you. Add them by hand to give a one-shot `prompt()` some history
@@ -671,113 +671,139 @@ without storing any. `USER` and `ASSISTANT` are the only roles — a system mess
 `setRole()` is for — and anything else throws. The text isn't checked: an empty reply is
 the adapter's to refuse, not the prompt's.
 
-**An adapter sees turns twice over**, and should use whichever it has a use for:
+**An adapter sees messages twice over**, and should use whichever it has a use for:
 
-- `$prompt->getTurns()` in `send()`, for an API with a real message list. This is the
-  reason turns aren't just text: a chat API wants `[{role, content}, ...]`, and building
+- `$prompt->getMessages()` in `send()`, for an API with a real message list. This is the
+  reason messages aren't just text: a chat API wants `[{role, content}, ...]`, and building
   that from a rendered blob means parsing your own output back.
 - the `conversation` context section of the formatted prompt, for an API that takes one
-  block of text. `handlePrompt()` renders each turn as `User: ...` / `Assistant: ...`
+  block of text. `handlePrompt()` renders each message as `User: ...` / `Assistant: ...`
   there, in whatever format the adapter uses, so an adapter written before any of this
   existed still sees the conversation.
 
 An adapter gets both by default, which for the first kind means sending the history twice
-over — once as messages, once as prose, at twice the tokens. Turn the rendering off:
+over — once as messages, once as prose, at twice the tokens. Message the rendering off:
 
 ```php
 class Example extends LLM
 {
-    protected bool $renderTurns = false;   // send() reads getTurns() and builds messages
+    protected bool $renderMessages = false;   // send() reads getMessages() and builds messages
 }
 ```
 
 Dropping `context` from `$order` would do it too, but it also costs you the static and
-retrieved context. `$renderTurns` only takes out the conversation.
+retrieved context. `$renderMessages` only takes out the conversation.
 
-That second path runs through `context`, which has one more consequence worth stating
-plainly: **an adapter whose `$order` leaves out `context` renders no conversation either**,
-and if it doesn't read `getTurns()` itself, `chat()` quietly becomes `prompt()` with extra
-bookkeeping. Leave `context` out only when `send()` handles the turns.
+That second path runs through `context`, so **an adapter that renders messages must order
+`context`** - otherwise the conversation would go nowhere while the store kept growing.
+`registerModels()` rejects that combination outright, so it fails where the adapter is
+defined rather than in production. Leave `context` out only with `$renderMessages = false`,
+where `send()` handles the messages itself.
+
+Set both and the history goes to the model **twice** - once as messages, once as prose, at
+twice the tokens. Turn the rendering off whenever `send()` reads `getMessages()`.
 
 **Where history lives** is your application's business, so the framework asks for an
 interface and takes one line at bootstrap:
 
 ```php
-LLM::storeChatsIn(new DatabaseChatStore());
+LLM::storeThreadsIn(new DatabaseThreadStore());
 ```
 
 ```php
-interface ChatStore
+interface ThreadStore
 {
-    /** @return array<int, array{role: string, text: string}> */
-    public function turns(string $sessionId): array;
+    public function read(string $threadId): Thread;    // a loaded value object
 
-    public function append(string $sessionId, array $turns): void;
+    /** @param array $messages list<array{role: string, text: string, author?: string|null}> */
+    public function append(string $threadId, array $messages): void;
 
-    public function forget(string $sessionId): void;
+    public function forget(string $threadId): void;
 }
 ```
 
-Leave that line out and `chat()` falls back on `Jambura\LLM\CacheChatStore`, over `jCache`,
+`Jambura\LLM\Thread` is a plain value object - `id()`, `messages()`, `recent($count)`,
+`isEmpty()`, `count()` - and reaches nothing. That is what lets a prompt take a conversation
+without depending on where conversations live:
+
+```php
+$prompt->loadConversation(LLM::threads()->read($threadId)->recent(10));
+$prompt->forgetConversation();      // and send the same prompt without it
+```
+
+`chat()` does exactly that on a copy of your prompt, so you only reach for these to use a
+history with plain `prompt()`, or to render a thread in a UI.
+
+Leave that line out and `chat()` falls back on `Jambura\LLM\CacheThreadStore`, over `jCache`,
 so a conversation works with no wiring at all. **Don't leave it in production.** jCache
 keeps every key in one JSON file and rewrites the whole file on each write, so two requests
-appending to the same session at the same moment don't interleave their turns — the second
-write is built from the state the first hadn't finished writing, and a turn is lost
+appending to the same thread at the same moment don't interleave their messages — the second
+write is built from the state the first hadn't finished writing, and a message is lost
 outright. It's enough to try `chat()` out and enough for a single-process script. It is not
-enough for two users on one session id.
+enough for two users on one thread id.
 
 A table for a real store:
 
 ```php
 public function change(): void
 {
-    $this->table('chat_turns')
-        ->addColumn('session_id', 'string', ['limit' => 64])
+    $this->table('thread_messages')
+        ->addColumn('thread_id', 'string', ['limit' => 64])
         ->addColumn('role', 'string', ['limit' => 16])
+        ->addColumn('author', 'string', ['limit' => 64, 'null' => true])
         ->addColumn('text', 'text')
         ->addColumn('created_at', 'timestamp', ['default' => 'CURRENT_TIMESTAMP'])
-        ->addIndex(['session_id', 'id'])
+        ->addIndex(['thread_id', 'id'])
         ->create();
 }
 ```
 
-`turns()` is then `SELECT ... WHERE session_id = ? ORDER BY id`, and `append()` is an
-insert per turn. Keep `append()` append-only — never a read-modify-write of the whole
+`read()` is then `SELECT ... WHERE thread_id = ? ORDER BY id` wrapped in a `Thread`, and
+`append()` is an insert per message. Keep `append()` append-only — never a read-modify-write of the whole
 history — so that two writers interleave rather than clobber.
+
+**Who said it** is optional, for a conversation with more than one person in it. The wire
+format only has `user` and `assistant`, so an author is rendered as a prefix - but it is kept
+as a field, in the prompt and in the store, so a UI can show it without parsing text apart:
+
+```php
+$prompt->addMessage(Prompt::USER, 'what is the ETA?', 'Kamrul');
+// rendered as `Kamrul: what is the ETA?`, and as `Assistant: ...` where there is no author
+```
 
 **How much history is sent** is a property on the adapter, set like the others:
 
 ```php
 class Example extends LLM
 {
-    protected int $keepTurns = 10;   // most recent turns sent with each prompt; 0 sends none
+    protected int $keepMessages = 10;   // most recent messages sent with each prompt; 0 sends none
 }
 ```
 
-Older turns stay in the store; they're simply not sent. Trimming is about what reaches the
-model, not about what you keep. It counts turns, not tokens — a token budget wants a
+Older messages stay in the store; they're simply not sent. Trimming is about what reaches the
+model, not about what you keep. It counts messages, not tokens — a token budget wants a
 compressor to fall back on, and that isn't written yet. A negative value throws at
 registration.
 
 **The rest of the behaviour**, briefly:
 
 - **A failed call stores nothing.** If `send()` throws, neither the question nor a reply is
-  kept, so a retry on the same session id doesn't find half an exchange waiting.
-- **History belongs to the session id, not the adapter.** Answer with one model and
+  kept, so a retry on the same thread id doesn't find half an exchange waiting.
+- **History belongs to the thread id, not the adapter.** Answer with one model and
   escalate the same conversation to another: the store records no adapter class, which is
   what a model-agnostic `Prompt` is for.
-- **Two writers, last one wins.** Two browser tabs on one session id can interleave.
+- **Two writers, last one wins.** Two browser tabs on one thread id can interleave.
   `append()` being append-only keeps that as harmless as it can be. Locking is yours.
-- **The prompt you hold is never touched.** Turns go onto a copy, so one prompt can be
+- **The prompt you hold is never touched.** Messages go onto a copy, so one prompt can be
   chatted twice without collecting history as it goes.
-- **Only the task and the reply are stored.** Turns you added to the prompt by hand are
+- **Only the task and the reply are stored.** Messages you added to the prompt by hand are
   sent, after the stored history, but aren't written to the store — they belong to the one
   call.
 - `chat()` is `final`, as `prompt()` is, so an adapter can't half-override the history
   handling.
-- `LLM::chatTurns($sessionId)` returns the stored thread, for rendering it.
-  `LLM::forgetChat($sessionId)` drops it. `LLM::forgetChatStore()` drops the configured
-  store, which tests want between cases.
+- **Reading and dropping a conversation go through the store**, which already does both:
+  `LLM::threads()->read($threadId)->messages()` and `LLM::threads()->forget($threadId)`.
+  `LLM::forgetThreadStore()` drops the configured store, which tests want between cases.
 
 ## LLM pipelines
 
@@ -906,7 +932,7 @@ to every application.
 Phinx 0.16 changed two defaults: an implicit `id` is now `int unsigned`, and columns are
 nullable unless told otherwise. Migrations written under Phinx 0.11 (jambura-core 2.x)
 replay into a different schema under those defaults. They can even fail outright, once a
-signed foreign key points at an unsigned id. Turn both off in `phinx.php`:
+signed foreign key points at an unsigned id. Message both off in `phinx.php`:
 
 ```php
 'feature_flags' => [

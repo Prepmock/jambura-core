@@ -1,8 +1,8 @@
 <?php
 namespace Jambura;
 
-use Jambura\LLM\CacheChatStore;
-use Jambura\LLM\ChatStore;
+use Jambura\LLM\CacheThreadStore;
+use Jambura\LLM\ThreadStore;
 use Jambura\LLM\Format;
 use Jambura\LLM\LLMException;
 use Jambura\LLM\Prompt;
@@ -37,11 +37,11 @@ abstract class LLM
 
     /**
      * Where chat() keeps conversations, or null until one is asked for. Global
-     * rather than per adapter, because a history belongs to the session id and
+     * rather than per adapter, because a history belongs to the thread id and
      * not to whichever model happened to answer last.
-     * @var ChatStore|null
+     * @var ThreadStore|null
      */
-    private static ?ChatStore $chatStore = null;
+    private static ?ThreadStore $threadStore = null;
 
     /**
      * Model id sent to the provider's API.
@@ -64,28 +64,28 @@ abstract class LLM
     protected array $order = self::SECTIONS;
 
     /**
-     * How many of a session's most recent turns chat() sends with each prompt.
-     * Older turns stay in the store; they are simply not sent.
+     * How many of a thread's most recent messages chat() sends with each prompt.
+     * Older messages stay in the store; they are simply not sent.
      *
-     * Turns, not tokens: a token budget wants a compressor to fall back on, and
+     * Messages, not tokens: a token budget wants a compressor to fall back on, and
      * that is not written yet. Set it to 0 for an adapter that should answer
      * each question on its own.
      * @var int
      */
-    protected int $keepTurns = 10;
+    protected int $keepMessages = 10;
 
     /**
-     * Whether handlePrompt() renders the prompt's turns into the `conversation`
+     * Whether handlePrompt() renders the prompt's messages into the `conversation`
      * context section.
      *
      * Leave it on for an adapter whose API takes one block of text: it is what
-     * lets an adapter written before turns existed still see a conversation.
-     * Turn it off in an adapter that reads getTurns() in send() and builds a
+     * lets an adapter written before messages existed still see a conversation.
+     * Turn it off in an adapter that reads getMessages() in send() and builds a
      * message list, or the history goes to the model twice — once as messages
      * and once as prose — at twice the tokens.
      * @var bool
      */
-    protected bool $renderTurns = true;
+    protected bool $renderMessages = true;
 
     /**
      * Adapters are built by use(), never with `new`.
@@ -103,7 +103,7 @@ abstract class LLM
      * @param string[] $classes adapter class names
      *
      * @throws LLMException if a class does not exist, is not a concrete LLM,
-     *                      or has an invalid $order or $keepTurns
+     *                      or has an invalid $order or $keepMessages
      */
     public static function registerModels(array $classes): void
     {
@@ -118,7 +118,8 @@ abstract class LLM
             }
             $defaults = $reflection->getDefaultProperties();
             self::checkOrder($class, $defaults['order']);
-            self::checkKeepTurns($class, $defaults['keepTurns']);
+            self::checkKeepMessages($class, $defaults['keepMessages']);
+            self::checkRenderMessages($class, $defaults);
             self::$models[strtolower($class)] ??= null;
         }
     }
@@ -155,15 +156,15 @@ abstract class LLM
      *
      * One line, where the application boots:
      *
-     *     \Jambura\LLM::storeChatsIn(new DatabaseChatStore());
+     *     \Jambura\LLM::storeThreadsIn(new DatabaseChatStore());
      *
      * Calling it again replaces the store. Leave it out entirely and chat()
-     * falls back on CacheChatStore, which works with no wiring but keeps every
+     * falls back on CacheThreadStore, which works with no wiring but keeps every
      * history in one cache file — read what that costs before relying on it.
      */
-    public static function storeChatsIn(ChatStore $store): void
+    public static function storeThreadsIn(ThreadStore $store): void
     {
-        self::$chatStore = $store;
+        self::$threadStore = $store;
     }
 
     /**
@@ -171,34 +172,9 @@ abstract class LLM
      *
      * Here for tests, which need each case to start from a known store.
      */
-    public static function forgetChatStore(): void
+    public static function forgetThreadStore(): void
     {
-        self::$chatStore = null;
-    }
-
-    /**
-     * Every turn stored under a session id, oldest first.
-     *
-     * chat() returns only the reply, which is what a caller usually wants to
-     * print. This is for one that wants to render the whole thread.
-     *
-     * @return list<array{role: string, text: string}>
-     *
-     * @throws LLMException if the session id is blank
-     */
-    public static function chatTurns(string $sessionId): array
-    {
-        return self::chatStore()->turns(self::checkSessionId($sessionId));
-    }
-
-    /**
-     * Drops a conversation, so the next chat() on that id starts fresh.
-     *
-     * @throws LLMException if the session id is blank
-     */
-    public static function forgetChat(string $sessionId): void
-    {
-        self::chatStore()->forget(self::checkSessionId($sessionId));
+        self::$threadStore = null;
     }
 
     /**
@@ -215,56 +191,52 @@ abstract class LLM
     }
 
     /**
-     * Answers a prompt with the conversation stored under a session id, and
+     * Answers a prompt with the conversation stored under a thread id, and
      * stores the exchange.
      *
-     *     $reply = \Jambura\LLM::use(\AIModel\Deepseek::class)->chat($prompt, $sessionId);
+     *     $reply = \Jambura\LLM::use(\AIModel\Deepseek::class)->chat($prompt, $threadId);
      *
-     * This is prompt() with history either side of it: the stored turns go onto
+     * This is prompt() with history either side of it: the stored messages go onto
      * a copy of the prompt, prompt() renders and sends it exactly as it always
      * does, and the question and reply are appended afterwards. An adapter's
      * $format, $order and send() do not change, and need not know chat() exists.
      *
-     * A session id nothing has been stored under simply starts a new history,
+     * A thread id nothing has been stored under simply starts a new history,
      * so there is no start-or-resume decision for a caller to get wrong. The id
      * is the caller's to choose: a user id, a chat row id, a uuid handed to the
      * browser.
      *
-     * The prompt the caller holds is never touched — the turns go onto a copy —
+     * The prompt the caller holds is never touched — the messages go onto a copy —
      * so one prompt can be chatted twice without collecting history as it goes.
      *
      * Nothing is stored unless the call succeeds. If send() throws, neither the
-     * question nor a reply is kept, so a retry on the same session id does not
+     * question nor a reply is kept, so a retry on the same thread id does not
      * find half an exchange waiting for it.
      *
-     * What is stored is the task and the reply, and only those. Turns the caller
+     * What is stored is the task and the reply, and only those. Messages the caller
      * added to the prompt by hand are sent, after the stored history, but are
      * not themselves written to the store: they belong to this call.
      *
-     * @param string $sessionId the conversation this prompt belongs to
+     * @param string $threadId the conversation this prompt belongs to
      *
-     * @throws LLMException if the session id is blank, the prompt has no task,
-     *                      the store returns a turn with an unknown role, or
+     * @throws LLMException if the thread id is blank, the prompt has no task,
+     *                      the store returns a message with an unknown role, or
      *                      the API call fails
      */
-    final public function chat(Prompt $prompt, string $sessionId): string
+    final public function chat(Prompt $prompt, string $threadId): string
     {
-        $sessionId = self::checkSessionId($sessionId);
-        $store = self::chatStore();
+        $threadId = $this->checkThreadId($threadId);
+        $store = self::threads();
 
-        // Turns the caller added by hand follow the stored history, because the
-        // history is older: clearTurns() on the copy, then both in order.
-        $added = $prompt->getTurns();
-        $copy = (clone $prompt)->clearTurns();
-        foreach ([...$this->recentTurns($store->turns($sessionId)), ...$added] as $turn) {
-            $copy->addTurn($turn['role'], $turn['text']);
-        }
+        // A copy, so that the caller's prompt is left as it was and calling this
+        // twice cannot load the same history twice.
+        $copy = (clone $prompt)->loadConversation($store->read($threadId)->recent($this->keepMessages));
 
         $reply = $this->prompt($copy);
 
-        $store->append($sessionId, [
-            ['role' => Prompt::USER, 'text' => $copy->getTask()],
-            ['role' => Prompt::ASSISTANT, 'text' => $reply],
+        $store->append($threadId, [
+            ['role' => Prompt::USER, 'text' => $copy->getTask(), 'author' => null],
+            ['role' => Prompt::ASSISTANT, 'text' => $reply, 'author' => null],
         ]);
 
         return $reply;
@@ -290,14 +262,14 @@ abstract class LLM
      * Empty sections are left out, and the prompt's type is never rendered.
      * Override this only for a format the Format enum does not cover.
      *
-     * Any turns on the prompt are rendered into the `conversation` context
-     * section, so that an adapter which ignores getTurns() still sees what was
-     * said. Set $renderTurns to false in an adapter that reads the turns itself.
+     * Any messages on the prompt are rendered into the `conversation` context
+     * section, so that an adapter which ignores getMessages() still sees what was
+     * said. Set $renderMessages to false in an adapter that reads the messages itself.
      *
      * Note what this ties together: an adapter whose $order leaves out `context`
-     * renders no conversation either, and if it does not read getTurns(), chat()
+     * renders no conversation either, and if it does not read getMessages(), chat()
      * quietly becomes prompt() with extra bookkeeping. Leave `context` out only
-     * when send() handles the turns.
+     * when send() handles the messages.
      *
      * @throws LLMException if $order is invalid
      */
@@ -309,7 +281,7 @@ abstract class LLM
         foreach ($this->order as $name) {
             $value = match ($name) {
                 'role' => $prompt->getRole(),
-                'context' => $this->renderTurns ? self::contextWithTurns($prompt) : $prompt->getContext(),
+                'context' => $this->renderMessages ? $this->contextWithConversation($prompt) : $prompt->getContext(),
                 'instructions' => $prompt->getInstructions(),
             };
             if ($value !== null && $value !== '' && $value !== []) {
@@ -345,49 +317,46 @@ abstract class LLM
     /**
      * The store chat() uses, building the cache-backed default on first ask.
      */
-    private static function chatStore(): ChatStore
-    {
-        return self::$chatStore ??= new CacheChatStore();
-    }
-
     /**
-     * The most recent $keepTurns turns, or all of them if there are fewer.
+     * The store conversations are kept in, building the default on first ask.
      *
-     * @param list<array{role: string, text: string}> $turns oldest first
+     * Here so that a caller can read or drop a conversation - chat() returns
+     * only the reply - without the framework growing pass-through methods for
+     * what the store already does:
      *
-     * @return list<array{role: string, text: string}>
+     *     LLM::threads()->read($threadId)->messages();
+     *     LLM::threads()->forget($threadId);
      */
-    private function recentTurns(array $turns): array
+    public static function threads(): ThreadStore
     {
-        // Checked rather than left to array_slice, which reads an offset of -0
-        // as 0 and would hand back the whole history for an adapter that asked
-        // for none of it.
-        if ($this->keepTurns === 0) {
-            return [];
-        }
-        return count($turns) > $this->keepTurns ? array_slice($turns, -$this->keepTurns) : $turns;
+        return self::$threadStore ??= new CacheThreadStore();
     }
 
+
     /**
-     * The prompt's context, with its turns rendered into `conversation`.
+     * The prompt's context, with its messages rendered into `conversation`.
      *
-     * Turns are appended after anything the caller put in that section itself,
+     * Messages are appended after anything the caller put in that section itself,
      * which leaves a hand-written summary of an older conversation sitting in
-     * front of the turns it summarises.
+     * front of the messages it summarises.
      *
      * @return array<string, string[]>
      */
-    private static function contextWithTurns(Prompt $prompt): array
+    private function contextWithConversation(Prompt $prompt): array
     {
         $context = $prompt->getContext();
-        $turns = $prompt->getTurns();
-        if (!$turns) {
+        $messages = $prompt->getMessages();
+        if (!$messages) {
             return $context;
         }
 
         $spoken = [];
-        foreach ($turns as $turn) {
-            $spoken[] = ucfirst($turn['role']) . ': ' . $turn['text'];
+        foreach ($messages as $message) {
+            // The author when there is one, so a group conversation reads as who
+            // said what; the role otherwise, so the model can tell its own lines.
+            $speaker = $message['author'] ?? null;
+            $spoken[] = ($speaker === null || trim($speaker) === '' ? ucfirst($message['role']) : $speaker)
+                . ': ' . $message['text'];
         }
         $context['conversation'] = array_merge($context['conversation'] ?? [], $spoken);
 
@@ -395,24 +364,48 @@ abstract class LLM
     }
 
     /**
-     * @throws LLMException if the session id is blank
+     * @throws LLMException if the thread id is blank
      */
-    private static function checkSessionId(string $sessionId): string
+    private function checkThreadId(string $threadId): string
     {
-        if (trim($sessionId) === '') {
-            throw new LLMException('A chat needs a session id');
+        if (trim($threadId) === '') {
+            throw new LLMException('A chat needs a thread id');
         }
-        return $sessionId;
+        return $threadId;
     }
 
     /**
-     * @throws LLMException if $keepTurns is negative
+     * Rejects an adapter that would render a conversation nowhere.
+     *
+     * handlePrompt() renders messages into the `conversation` context section, so
+     * an adapter that renders them while leaving `context` out of $order sends no
+     * conversation at all - and if it does not read getMessages() in send()
+     * either, chat() quietly becomes prompt() while the store keeps growing.
+     * That is a definition mistake, so it fails where the adapter is registered.
+     *
+     * @param array $defaults the class's default property values
+     *
+     * @throws LLMException if messages are rendered but `context` is not ordered
      */
-    private static function checkKeepTurns(string $class, int $keepTurns): void
+    private static function checkRenderMessages(string $class, array $defaults): void
     {
-        if ($keepTurns < 0) {
+        if ($defaults['renderMessages'] && !in_array('context', $defaults['order'], true)) {
             throw new LLMException(
-                "$class::\$keepTurns cannot be negative. Use 0 to send no history"
+                "$class renders messages into the `context` section, but its \$order leaves "
+                . 'context out, so a conversation would go nowhere. Order context, or set '
+                . '$renderMessages to false and read getMessages() in send()'
+            );
+        }
+    }
+
+    /**
+     * @throws LLMException if $keepMessages is negative
+     */
+    private static function checkKeepMessages(string $class, int $keepMessages): void
+    {
+        if ($keepMessages < 0) {
+            throw new LLMException(
+                "$class::\$keepMessages cannot be negative. Use 0 to send no history"
             );
         }
     }

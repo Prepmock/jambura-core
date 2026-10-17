@@ -16,14 +16,14 @@ class Prompt
     const CONTEXT_SECTIONS = ['static', 'retrieved', 'dynamic', 'conversation'];
 
     /**
-     * Roles a turn can be spoken by. The caller asks as USER, the model answers
+     * Roles a message can be spoken by. The caller asks as USER, the model answers
      * as ASSISTANT; there is no system role, because that is what setRole() is.
      */
     const USER = 'user';
     const ASSISTANT = 'assistant';
 
     /**
-     * Every role addTurn() accepts.
+     * Every role addMessage() accepts.
      */
     const ROLES = [self::USER, self::ASSISTANT];
 
@@ -63,13 +63,13 @@ class Prompt
      *
      * Kept apart from the context sections because an adapter over a chat API
      * wants these as real messages with roles, not as prose: send() receives the
-     * Prompt, so it can read getTurns() and map them onto whatever its API calls
+     * Prompt, so it can read getMessages() and map them onto whatever its API calls
      * a message list. For adapters that do not, handlePrompt() renders them into
      * the `conversation` context section instead, so nothing is lost.
      *
      * @var list<array{role: string, text: string}>
      */
-    private array $turns = [];
+    private array $messages = [];
 
     /**
      * Files the model should read.
@@ -156,12 +156,12 @@ class Prompt
     }
 
     /**
-     * Appends a turn to the conversation.
+     * Appends a message to the conversation.
      *
-     * Turns are appended in the order they were spoken, oldest first:
+     * Messages are appended in the order they were spoken, oldest first:
      *
-     *     $prompt->addTurn(Prompt::USER, 'What is my leave balance?')
-     *            ->addTurn(Prompt::ASSISTANT, 'You have 12 days.');
+     *     $prompt->addMessage(Prompt::USER, 'What is my leave balance?')
+     *            ->addMessage(Prompt::ASSISTANT, 'You have 12 days.');
      *
      * The role is checked because it is one of two fixed values and a typo would
      * otherwise reach the model as a role it does not know. The text is not: it
@@ -174,26 +174,59 @@ class Prompt
      *
      * @throws LLMException if the role is not one of ROLES
      */
-    public function addTurn(string $role, string $text): static
+    public function addMessage(string $role, string $text, ?string $author = null): static
     {
         if (!in_array($role, self::ROLES, true)) {
             throw new LLMException(
-                "Unknown turn role '$role'. Use one of: " . implode(', ', self::ROLES)
+                "Unknown message role '$role'. Use one of: " . implode(', ', self::ROLES)
             );
         }
-        $this->turns[] = ['role' => $role, 'text' => $text];
+        $this->messages[] = ['role' => $role, 'text' => $text, 'author' => $author];
         return $this;
     }
 
     /**
-     * Drops every turn.
+     * Puts a conversation's messages onto this prompt, in front of any already here.
      *
-     * The counterpart to addTurn(), and how LLM::chat() puts a stored history in
-     * front of turns the caller added by hand rather than behind them.
+     * The thread is older than anything a caller has just added, so it goes
+     * first and the caller's messages follow:
+     *
+     *     $prompt->loadConversation($store->read($threadId)->recent(10));
+     *
+     * Nothing is read from storage here - a Thread is a value object that
+     * already holds its messages - which is what keeps a prompt free of any
+     * dependency on where conversations live.
+     *
+     * It loads in front of what is there rather than replacing it, so calling it
+     * twice loads the history twice. LLM::chat() works on a copy of the caller's
+     * prompt for that reason.
+     *
+     * @throws LLMException if the thread holds a message with an unknown role
      */
-    public function clearTurns(): static
+    public function loadConversation(Thread $thread): static
     {
-        $this->turns = [];
+        $added = $this->messages;
+        $this->messages = [];
+
+        foreach ([...$thread->messages(), ...$added] as $message) {
+            $this->addMessage(
+                $message['role'] ?? '',
+                $message['text'] ?? '',
+                $message['author'] ?? null
+            );
+        }
+        return $this;
+    }
+
+    /**
+     * Drops every message, leaving the rest of the prompt alone.
+     *
+     * The counterpart to loadConversation(), for a caller that wants to send the
+     * same prompt without the conversation it was carrying.
+     */
+    public function forgetConversation(): static
+    {
+        $this->messages = [];
         return $this;
     }
 
@@ -273,9 +306,9 @@ class Prompt
      *
      * @return list<array{role: string, text: string}>
      */
-    public function getTurns(): array
+    public function getMessages(): array
     {
-        return $this->turns;
+        return $this->messages;
     }
 
     /**
