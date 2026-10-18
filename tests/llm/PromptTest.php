@@ -2,6 +2,7 @@
 
 use Jambura\LLM\LLMException;
 use Jambura\LLM\Prompt;
+use Jambura\LLM\Thread;
 use PHPUnit\Framework\TestCase;
 
 class PromptTest extends TestCase
@@ -132,5 +133,125 @@ class PromptTest extends TestCase
 
         $this->assertSame([], $prompt->getDocuments());
         $this->assertSame([], $prompt->getOptions());
+        $this->assertSame([], $prompt->getMessages());
     }
+
+    public function testMessagesAreKeptInTheOrderTheyWereSpoken(): void
+    {
+        $prompt = Prompt::create()
+            ->addMessage(Prompt::USER, 'What is my leave balance?')
+            ->addMessage(Prompt::ASSISTANT, 'You have 12 days.')
+            ->addMessage(Prompt::USER, 'And carried over?');
+
+        $this->assertSame([
+            ['role' => 'user', 'text' => 'What is my leave balance?', 'author' => null],
+            ['role' => 'assistant', 'text' => 'You have 12 days.', 'author' => null],
+            ['role' => 'user', 'text' => 'And carried over?', 'author' => null],
+        ], $prompt->getMessages());
+    }
+
+    /**
+     * Messages are not context. A prompt carrying a conversation still renders an
+     * empty context section, so a reducer or an adapter reading one does not
+     * find the other.
+     */
+    public function testMessagesAreNotContext(): void
+    {
+        $prompt = Prompt::create()->addMessage(Prompt::USER, 'Hello');
+
+        $this->assertSame([], $prompt->getContext());
+    }
+
+    public function testClearMessagesDropsEveryMessageAndNothingElse(): void
+    {
+        $prompt = Prompt::create()
+            ->setTask('Summarize')
+            ->addContext('conversation', 'Discussed last quarter')
+            ->addMessage(Prompt::USER, 'Hello');
+
+        $this->assertSame([], $prompt->forgetConversation()->getMessages());
+        $this->assertSame(['conversation' => ['Discussed last quarter']], $prompt->getContext());
+        $this->assertSame('Summarize', $prompt->getTask());
+    }
+
+    public function testAMessageNeedsAKnownRole(): void
+    {
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage("Unknown message role 'system'. Use one of: user, assistant");
+        Prompt::create()->addMessage('system', 'You are an analyst');
+    }
+
+    /**
+     * The role is checked; the text is not. An empty reply is a thing a model
+     * can do, and refusing it here would throw after the call already succeeded.
+     */
+    public function testAMessageAcceptsEmptyText(): void
+    {
+        $prompt = Prompt::create()->addMessage(Prompt::ASSISTANT, '');
+
+        $this->assertSame([['role' => 'assistant', 'text' => '', 'author' => null]], $prompt->getMessages());
+    }
+    public function testLoadConversationPutsAThreadInFrontOfMessagesAlreadyAdded(): void
+    {
+        $prompt = Prompt::create()->setTask('And customs?');
+        $prompt->addMessage(Prompt::USER, 'Added by hand', 'Laltu');
+
+        $prompt->loadConversation(new Thread('thread-1', [
+            ['role' => 'user', 'text' => 'ETA?', 'author' => 'Kamrul'],
+            ['role' => 'assistant', 'text' => '14:00', 'author' => null],
+        ]));
+
+        $this->assertSame([
+            ['role' => 'user', 'text' => 'ETA?', 'author' => 'Kamrul'],
+            ['role' => 'assistant', 'text' => '14:00', 'author' => null],
+            ['role' => 'user', 'text' => 'Added by hand', 'author' => 'Laltu'],
+        ], $prompt->getMessages());
+    }
+
+    public function testLoadConversationNeedsNoStoreOrFilesystem(): void
+    {
+        $prompt = Prompt::create()->setTask('x')->loadConversation(new Thread('thread-1'));
+
+        $this->assertSame([], $prompt->getMessages());
+    }
+
+    /**
+     * It loads in front of what is there rather than replacing it, so loading
+     * twice loads twice - which is why chat() works on a copy.
+     */
+    public function testLoadingTheSameThreadTwiceLoadsItTwice(): void
+    {
+        $thread = new Thread('thread-1', [['role' => 'user', 'text' => 'ETA?', 'author' => null]]);
+        $prompt = Prompt::create()->setTask('And customs?');
+
+        $prompt->loadConversation($thread)->loadConversation($thread);
+
+        $this->assertCount(2, $prompt->getMessages());
+    }
+
+    public function testLoadConversationRejectsAThreadWithAnUnknownRole(): void
+    {
+        $this->expectException(LLMException::class);
+        $this->expectExceptionMessage("Unknown message role 'system'");
+        Prompt::create()->setTask('x')->loadConversation(
+            new Thread('thread-1', [['role' => 'system', 'text' => 'nope', 'author' => null]])
+        );
+    }
+
+    public function testForgetConversationLeavesTheRestOfThePromptAlone(): void
+    {
+        $prompt = Prompt::create()
+            ->setRole('Analyst')
+            ->addContext('static', 'Port rules')
+            ->setTask('And customs?');
+        $prompt->addMessage(Prompt::USER, 'ETA?');
+
+        $prompt->forgetConversation();
+
+        $this->assertSame([], $prompt->getMessages());
+        $this->assertSame('Analyst', $prompt->getRole());
+        $this->assertSame(['static' => ['Port rules']], $prompt->getContext());
+        $this->assertSame('And customs?', $prompt->getTask());
+    }
+
 }
