@@ -22,6 +22,25 @@ abstract class Rest extends Controller
     protected $respCode = 200;
 
     /**
+     * The request the next controller built should answer, with its response
+     * captured rather than sent. Consumed by init().
+     * @var Request|null
+     */
+    private static $pendingCapture = null;
+
+    /**
+     * Whether this controller collects its response instead of sending it.
+     * @var bool
+     */
+    private $capturing = false;
+
+    /**
+     * The response collected in capture mode.
+     * @var array|null
+     */
+    private $captured = null;
+
+    /**
      * Pre-formated response to be sent to the client.
      * @var array
      */
@@ -52,6 +71,39 @@ abstract class Rest extends Controller
     abstract protected function authenticate();
 
     /**
+     * Answers the next controller's request from here, and captures its response.
+     *
+     * A REST controller sends its response and exits, which is right in a web
+     * request and useless anywhere else: nothing in the process can read what it
+     * answered. In capture mode the response is collected instead, and
+     * sendError() raises jamexResponseReady rather than exiting, so a caller can
+     * read the status and the payload with capturedResponse().
+     *
+     * Set just before the controller is built, since authenticate() runs during
+     * construction and may answer 401 before an action is ever reached. The
+     * MCP layer uses this to run a tool call; a test harness uses it to run an
+     * action without a web server.
+     *
+     * @param Request $request the request the controller should answer
+     */
+    public static function captureNext(Request $request)
+    {
+        self::$pendingCapture = $request;
+    }
+
+    /**
+     * The response this controller collected in capture mode.
+     *
+     * @return array{status: int, response: array}
+     */
+    public function capturedResponse()
+    {
+        return $this->captured === null
+            ? ['status' => $this->respCode, 'response' => $this->response]
+            : $this->captured;
+    }
+
+    /**
      * Initial method executes prior to execution of the requested action.
      *
      * Overrides and executes parents init(). Loads local properties based 
@@ -62,7 +114,16 @@ abstract class Rest extends Controller
         parent::init();
         $this->loadTemplate = false;
         $this->parseApi = true;
-        $this->method = $_SERVER['REQUEST_METHOD'];
+
+        if (self::$pendingCapture !== null) {
+            $this->capturing = true;
+            $this->withRequest(self::$pendingCapture);
+            self::$pendingCapture = null;
+        }
+
+        $this->method = $this->capturing
+            ? $this->request()->method()
+            : $_SERVER['REQUEST_METHOD'];
         $this->setRequestPayload();
         try {
             if (!$this->authenticate()) {
@@ -86,6 +147,12 @@ abstract class Rest extends Controller
     {
         $this->respCode = $code;
         $this->response['error'] = $message ? $message : $this->getStatusCodeMessage($code);
+
+        if ($this->capturing) {
+            $this->captured = ['status' => $this->respCode, 'response' => $this->response];
+            throw new \jamexResponseReady($this->response['error'], $code);
+        }
+
         $this->sendResponse();
         exit();
     }
@@ -283,6 +350,11 @@ abstract class Rest extends Controller
      */
     protected function sendResponse()
     {
+        if ($this->capturing) {
+            $this->captured = ['status' => $this->respCode, 'response' => $this->response];
+            return;
+        }
+
         // First prepare the header
         $this->loadResponseHeader();
         // Format and send the respose
