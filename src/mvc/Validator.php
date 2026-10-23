@@ -277,7 +277,8 @@ class Validator
             $properties[$field] = $property;
         }
 
-        $schema = ['type' => 'object', 'properties' => $properties, 'additionalProperties' => false];
+        // An empty array would encode as [], and JSON Schema needs properties to be an object.
+        $schema = ['type' => 'object', 'properties' => $properties ?: new \stdClass(), 'additionalProperties' => false];
         if ($required) {
             $schema['required'] = $required;
         }
