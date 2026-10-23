@@ -83,9 +83,10 @@ class JsonSchemaTest extends TestCase
 
     public function testNoRulesMeansATooltakingNoArguments(): void
     {
+        // Checked as JSON, the way a client reads it: properties must be {}, not [].
         $this->assertSame(
-            ['type' => 'object', 'properties' => [], 'additionalProperties' => false],
-            Validator::jsonSchema([])
+            '{"type":"object","properties":{},"additionalProperties":false}',
+            json_encode(Validator::jsonSchema([]))
         );
     }
 
